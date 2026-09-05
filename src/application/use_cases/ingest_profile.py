@@ -71,6 +71,7 @@ class IngestProfileUseCase:
                     # Candidate-level
                     "candidate_id": dto.candidate_id,
                     "candidate_name": dto.candidate_name,
+                    "user_id": dto.user_id or None,  # Tenant ownership (legacy points lack it)
                     "resource_status": dto.resource_status,
                     "email": dto.email,
                     "education": dto.education,

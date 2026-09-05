@@ -192,10 +192,26 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
             raise
 
         secondary = asyncio.ensure_future(_call())
+        # Bound the WHOLE hedged pair — previously asyncio.wait had no
+        # deadline, so two simultaneously-hung calls stalled the request
+        # forever. The loser-wait keeps its own (generous) bound.
+        call_timeout = settings.gemini_call_timeout_s
+        loser_wait_timeout = max(call_timeout * 2, 30) if call_timeout > 0 else None
+        overall_deadline = (
+            hedge_delay + loser_wait_timeout + 5
+            if hedge_delay > 0 and loser_wait_timeout else None
+        )
         try:
             done, pending = await asyncio.wait(
-                {primary, secondary}, return_when=asyncio.FIRST_COMPLETED
+                {primary, secondary},
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=overall_deadline,
             )
+            if not done:
+                # Both calls blew the total deadline — hang, not slowness.
+                raise TimeoutError(
+                    "Both hedged Gemini calls exceeded the overall deadline"
+                )
             if not pending:
                 # Both finished before the waiter resumed — next(iter(pending))
                 # would raise StopIteration here. Prefer a successful result.
@@ -213,7 +229,7 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
                     winner.exception(),
                 )
                 return await asyncio.wait_for(
-                    asyncio.shield(loser), timeout=settings.gemini_call_timeout_s
+                    asyncio.shield(loser), timeout=loser_wait_timeout
                 )
             loser.cancel()
             return winner.result()
@@ -440,7 +456,7 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
                 exc,
             )
             raise SynthesisError(
-                reason=f"Gemini synthesis call failed: {exc}",
+                reason=f"Gemini synthesis call failed. Details logged.",
             ) from exc
 
     # ------------------------------------------------------------------
@@ -584,7 +600,7 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
                 exc,
             )
             raise SynthesisError(
-                reason=f"Gemini sales enablement call failed: {exc}",
+                reason=f"Gemini sales enablement call failed. Details logged.",
             ) from exc
 
     # ------------------------------------------------------------------
@@ -787,7 +803,7 @@ justification instead).
                 exc,
             )
             raise SynthesisError(
-                reason=f"Gemini profile synthesis failed: {exc}",
+                reason=f"Gemini profile synthesis failed. Details logged.",
             ) from exc
 
     # ------------------------------------------------------------------
@@ -985,5 +1001,5 @@ Rules:
                 "generate_technical_prep failed after %.3fs: %s", elapsed, exc
             )
             raise SynthesisError(
-                reason=f"Gemini technical prep generation failed: {exc}",
+                reason=f"Gemini technical prep generation failed. Details logged.",
             ) from exc

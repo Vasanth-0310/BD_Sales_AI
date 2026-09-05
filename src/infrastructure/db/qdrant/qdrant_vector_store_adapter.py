@@ -16,6 +16,8 @@ from qdrant_client.models import (
     MatchValue,
     MatchText,
     MatchAny,
+    IsEmptyCondition,
+    PayloadField,
 )
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -99,7 +101,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
             )
         except Exception as exc:
             logger.error("upsert_project_summary failed: %s", exc)
-            raise VectorStoreError(reason=f"Summary upsert failed: {exc}") from exc
+            raise VectorStoreError(reason=f"Summary upsert failed. Details logged.") from exc
 
     @retry(
         stop=stop_after_attempt(3),
@@ -163,12 +165,29 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         except Exception as exc:
             logger.error("upsert_project_chunks failed: %s", exc)
             raise VectorStoreError(
-                reason=f"Chunk upsert failed for project {project_id}: {exc}"
+                reason=f"Chunk upsert failed for project {project_id}. Details logged."
             ) from exc
 
     # ------------------------------------------------------------------
     # Searches
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _tenant_filter(user_id: str | None) -> Filter | None:
+        """Tenant-isolation filter for multi-user deployments.
+
+        Matches points owned by ``user_id`` OR legacy points with no
+        ``user_id`` payload at all (so data ingested before multi-tenancy
+        remains searchable). Returns None when no scoping is requested.
+        """
+        if not user_id:
+            return None
+        return Filter(
+            should=[
+                FieldCondition(key="user_id", match=MatchValue(value=user_id)),
+                IsEmptyCondition(is_empty=PayloadField(key="user_id")),
+            ]
+        )
 
     @retry(
         stop=stop_after_attempt(3),
@@ -177,6 +196,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
     )
     async def search_summaries_dense(
         self, query_vector: list[float], top_k: int = 10,
+        user_id: str | None = None,
     ) -> list[dict]:
         """Dense cosine-similarity search on the summaries collection."""
         start = time.perf_counter()
@@ -184,6 +204,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
             results = await self._client.query_points(
                 collection_name=self._summary_collection,
                 query=query_vector,
+                query_filter=self._tenant_filter(user_id),
                 limit=top_k,
             )
 
@@ -206,7 +227,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         except Exception as exc:
             logger.error("search_summaries_dense failed: %s", exc)
             raise VectorStoreError(
-                reason=f"Dense summary search failed: {exc}"
+                reason=f"Dense summary search failed. Details logged."
             ) from exc
 
     @retry(
@@ -216,6 +237,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
     )
     async def search_summaries_keyword(
         self, query_text: str, top_k: int = 10,
+        user_id: str | None = None,
     ) -> list[dict]:
         """Keyword (MatchText) search on the summaries collection.
 
@@ -247,7 +269,15 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
                     FieldCondition(key="techstacks", match=MatchText(text=token))
                 )
 
-            scroll_filter = Filter(should=should_conditions)
+            # Keyword conditions live in a nested OR-group; the tenant filter
+            # (if any) is ANDed on top via `must` — putting both in `should`
+            # would let tenant-owned points bypass the keyword match.
+            keyword_group = Filter(should=should_conditions)
+            must_clauses: list = [keyword_group]
+            tenant = self._tenant_filter(user_id)
+            if tenant is not None:
+                must_clauses.append(tenant)
+            scroll_filter = Filter(must=must_clauses)
 
             logger.debug(
                 "search_summaries_keyword  |  tokens=%d  conditions=%d",
@@ -282,7 +312,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         except Exception as exc:
             logger.error("search_summaries_keyword failed: %s", exc)
             raise VectorStoreError(
-                reason=f"Keyword summary search failed: {exc}"
+                reason=f"Keyword summary search failed. Details logged."
             ) from exc
 
     @retry(
@@ -336,7 +366,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         except Exception as exc:
             logger.error("search_chunks_dense failed: %s", exc)
             raise VectorStoreError(
-                reason=f"Dense chunk search failed: {exc}"
+                reason=f"Dense chunk search failed. Details logged."
             ) from exc
 
     # ------------------------------------------------------------------
@@ -391,7 +421,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         except Exception as exc:
             logger.error("delete_project failed: %s", exc)
             raise VectorStoreError(
-                reason=f"Delete project {project_id} failed: {exc}"
+                reason=f"Delete project {project_id} failed. Details logged."
             ) from exc
 
     # ------------------------------------------------------------------
@@ -429,7 +459,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         except Exception as exc:
             logger.error("upsert_profile_variant failed: %s", exc)
             raise VectorStoreError(
-                reason=f"Profile variant upsert failed for variant_id={variant_id}: {exc}"
+                reason=f"Profile variant upsert failed for variant_id={variant_id}. Details logged."
             ) from exc
 
     @retry(
@@ -457,7 +487,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         except Exception as exc:
             logger.error("delete_profile_variant failed: %s", exc)
             raise VectorStoreError(
-                reason=f"Delete profile variant {variant_id} failed: {exc}"
+                reason=f"Delete profile variant {variant_id} failed. Details logged."
             ) from exc
 
     @retry(
@@ -467,6 +497,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
     )
     async def search_profile_variants_dense(
         self, query_vector: list[float], top_k: int = 10,
+        user_id: str | None = None,
     ) -> list[dict]:
         """Dense cosine-similarity search on the profile_variants collection."""
         start = time.perf_counter()
@@ -474,6 +505,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
             results = await self._client.query_points(
                 collection_name=self._profile_collection,
                 query=query_vector,
+                query_filter=self._tenant_filter(user_id),
                 limit=top_k,
             )
 
@@ -496,7 +528,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         except Exception as exc:
             logger.error("search_profile_variants_dense failed: %s", exc)
             raise VectorStoreError(
-                reason=f"Dense profile variant search failed: {exc}"
+                reason=f"Dense profile variant search failed. Details logged."
             ) from exc
 
     @retry(
@@ -506,6 +538,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
     )
     async def search_profile_variants_keyword(
         self, query_text: str, top_k: int = 10,
+        user_id: str | None = None,
     ) -> list[dict]:
         """Keyword search on the profile_variants collection.
 
@@ -537,7 +570,14 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
                     FieldCondition(key="tech_stacks_text", match=MatchText(text=token))
                 )
 
-            scroll_filter = Filter(should=should_conditions)
+            # Nested OR-group for keywords + ANDed tenant filter (same
+            # reasoning as search_summaries_keyword).
+            keyword_group = Filter(should=should_conditions)
+            must_clauses: list = [keyword_group]
+            tenant = self._tenant_filter(user_id)
+            if tenant is not None:
+                must_clauses.append(tenant)
+            scroll_filter = Filter(must=must_clauses)
 
             logger.debug(
                 "search_profile_variants_keyword  |  tokens=%d  conditions=%d",
@@ -572,7 +612,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         except Exception as exc:
             logger.error("search_profile_variants_keyword failed: %s", exc)
             raise VectorStoreError(
-                reason=f"Keyword profile variant search failed: {exc}"
+                reason=f"Keyword profile variant search failed. Details logged."
             ) from exc
 
     @staticmethod
@@ -646,7 +686,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         except Exception as exc:
             logger.error("fetch_profile_variant_by_id failed: %s", exc)
             raise VectorStoreError(
-                reason=f"Fetch profile variant {variant_id} failed: {exc}"
+                reason=f"Fetch profile variant {variant_id} failed. Details logged."
             ) from exc
 
     # ------------------------------------------------------------------
@@ -684,7 +724,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         except Exception as exc:
             logger.error("check_project_exists failed: %s", exc)
             raise VectorStoreError(
-                reason=f"check_project_exists failed for {project_id}: {exc}"
+                reason=f"check_project_exists failed for {project_id}. Details logged."
             ) from exc
 
     @retry(
@@ -718,7 +758,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         except Exception as exc:
             logger.error("check_candidate_exists failed: %s", exc)
             raise VectorStoreError(
-                reason=f"check_candidate_exists failed for {candidate_id}: {exc}"
+                reason=f"check_candidate_exists failed for {candidate_id}. Details logged."
             ) from exc
 
     @retry(
@@ -774,5 +814,5 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         except Exception as exc:
             logger.error("delete_profiles_by_candidate_id failed: %s", exc)
             raise VectorStoreError(
-                reason=f"delete_profiles_by_candidate_id failed for {candidate_id}: {exc}"
+                reason=f"delete_profiles_by_candidate_id failed for {candidate_id}. Details logged."
             ) from exc

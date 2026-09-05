@@ -294,16 +294,22 @@ class ScrapeJobURL:
                             ),
                         )
 
-                # Update session last_used
+                # Update session last_used — never let a transient Mongo blip
+                # discard an already-successful fetch.
                 if session:
                     session.mark_used()
-                    await self._session_manager.persist(session)
+                    try:
+                        await self._session_manager.persist(session)
+                    except Exception as persist_err:
+                        logger.warning(
+                            f"Session persist failed (non-fatal): [{type(persist_err).__name__}] {persist_err}"
+                        )
 
             except Exception as e:
                 # Auth detection / persistence / unexpected errors must surface as a
                 # structured failure, not escape as an unhandled HTTP 500.
                 logger.error(f"Scrape failed for '{request.url}': [{type(e).__name__}] {e}", exc_info=True)
-                return JobResultDTO.failed(reason=f"[{type(e).__name__}] {e}" if str(e) else type(e).__name__)
+                return JobResultDTO.failed(reason="Internal error: please check server logs.")
             finally:
                 # Guarantees the pool tab (or the whole nodriver browser) is
                 # released even when auth detection, persistence, or extraction
@@ -333,7 +339,7 @@ class ScrapeJobURL:
                 company_profile = await self._company_profiler.profile(job_details.company)
             except Exception as e:
                 logger.error(f"Extraction failed for '{request.url}': [{type(e).__name__}] {e}", exc_info=True)
-                return JobResultDTO.failed(reason=f"[{type(e).__name__}] {e}" if str(e) else type(e).__name__)
+                return JobResultDTO.failed(reason="Internal error: please check server logs.")
             logger.info(f"Scrape successful (browser): '{job_details.title}' at '{job_details.company}'")
             return JobResultDTO.success(job_details=job_details, company_profile=company_profile)
 
@@ -392,7 +398,12 @@ class ScrapeJobURL:
 
             if session:
                 session.mark_used()
-                await self._session_manager.persist(session)
+                try:
+                    await self._session_manager.persist(session)
+                except Exception as persist_err:
+                    logger.warning(
+                        f"Session persist failed (non-fatal): [{type(persist_err).__name__}] {persist_err}"
+                    )
 
             # Extract from the fetched job detail page itself.
             cleaned_text = cleaned_curl_text
@@ -413,7 +424,7 @@ class ScrapeJobURL:
 
         except Exception as e:
             logger.error(f"Scrape failed for '{request.url}': [{type(e).__name__}] {e}", exc_info=True)
-            return JobResultDTO.failed(reason=f"[{type(e).__name__}] {e}" if str(e) else type(e).__name__)
+            return JobResultDTO.failed(reason="Internal error: please check server logs.")
 
     @staticmethod
     def _write_debug_text(domain: str, cleaned_text: str) -> None:

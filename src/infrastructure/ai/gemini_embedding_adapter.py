@@ -86,7 +86,7 @@ class GeminiEmbeddingAdapter(IEmbeddingPort):
                 exc,
             )
             raise EmbeddingError(
-                reason=f"Failed to embed document text: {exc}",
+                reason=f"Failed to embed document text. Details logged.",
             ) from exc
 
     @retry(
@@ -134,7 +134,7 @@ class GeminiEmbeddingAdapter(IEmbeddingPort):
                 exc,
             )
             raise EmbeddingError(
-                reason=f"Failed to embed query text: {exc}",
+                reason=f"Failed to embed query text. Details logged.",
             ) from exc
 
     @retry(
@@ -210,7 +210,7 @@ class GeminiEmbeddingAdapter(IEmbeddingPort):
                 exc,
             )
             raise EmbeddingError(
-                reason=f"Failed to embed batch of {len(texts)} texts: {exc}",
+                reason=f"Failed to embed batch of {len(texts)} texts. Details logged.",
             ) from exc
 
         elapsed = time.perf_counter() - start

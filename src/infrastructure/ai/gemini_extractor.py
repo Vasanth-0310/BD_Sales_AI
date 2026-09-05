@@ -46,7 +46,12 @@ Rules for extraction:
    you MUST return null. Do not give job platform names like "LinkedIn" or "Indeed" as the company either.
 5. 'industry': The industry or domain this role falls under (e.g. "Healthcare IT", "Fintech", "E-commerce", "SaaS"). Infer from the job context if not explicitly stated.
 6. 'role': A standardized, clean role label — different from the raw job title. Normalize it (e.g. "Mobile Developer (Cross-Platform)", "Full Stack Engineer", "Data Scientist"). Strip company names or seniority noise from the title if needed.
-7. 'location': The job location ONLY if explicitly stated in the posting (city, country, or "Remote"). Return null if the posting does not state a location — do NOT guess or infer one.
+7. 'location': The job location ONLY if explicitly stated in the posting. Return null if the posting does not state a location — do NOT guess or infer one. This is a structured object — only populate fields that are explicitly present:
+    - 'raw': the location text EXACTLY as shown on the page (e.g. "Bengaluru, Karnataka, India", "Remote").
+    - 'city': the city only (e.g. "Bengaluru"). null if not stated.
+    - 'state': the state/province/region only (e.g. "Karnataka"). null if not stated.
+    - 'country': the country only (e.g. "India"). null if not stated.
+    DECOMPOSITION RULE: when 'raw' contains comma-separated place names, you MUST decompose them into city/state/country (e.g. "Chennai, Tamilnadu, 600091 IN" → city="Chennai", state="Tamilnadu", country="IN"). A component stays null ONLY when raw genuinely contains no such component. For work-mode values like "Remote", "Hybrid" or "Work from home", set 'raw' only and leave city/state/country null. Postal codes are never city, state or country.
 8. 'employment_type': The employment arrangement if explicitly stated (e.g. "Contract", "Full-time", "Part-time", "Hourly", "Freelance"). Return null if not mentioned.
 9. 'duration': The project or contract length if mentioned (e.g. "3 to 6 months", "12 months", "ongoing"). Return null if not mentioned.
 10. 'level': The seniority level. Must be exactly one of: JUNIOR, INTERMEDIATE, SENIOR, EXPERT, or LEAD. Infer from experience requirements, salary, or title if not explicitly stated.
@@ -85,7 +90,9 @@ Rules for extraction:
     - 'designation': An abbreviated or acronym version of the 'role' if it can be shortened (e.g. "CEO", "HR Advisor", "TA"). If the role cannot be shortened meaningfully, leave null or duplicate the role.
     - 'email': Email address (e.g. "james@technovasolutions.com")
     - 'contact': Phone number or other contact info (e.g. "+13 456 483")
-    - 'location': The contact's location (e.g. "London, UK")
+    - 'city': The contact's city (e.g. "San Francisco", "London", "Bangalore"). Null if not stated.
+    - 'state': The contact's state or province (e.g. "CA", "California", "Karnataka"). Null if not stated.
+    - 'country': The contact's country (e.g. "USA", "United Kingdom", "India"). Null if not stated.
     If no client contact information is found in the posting, return null for the entire client_information object.
 18. 'apply_url': Extract any direct application URL or portal link if present. If not found, return null.
 19. If a field is not present in the text, return an empty list [] for lists, or null for optional string fields. Do not return empty strings "". Do not fabricate details.
@@ -403,7 +410,9 @@ class GeminiExtractor(IExtractor):
 
         except Exception as e:
             logger.error(f"[GeminiExtractor] Extraction failed: {e}")
-            raise ExtractionFailedException(reason=str(e)) from e
+            raise ExtractionFailedException(
+                reason="Gemini extraction failed. Details logged."
+            ) from e
 
     async def _generate_with_retry(self, prompt: str):
         """

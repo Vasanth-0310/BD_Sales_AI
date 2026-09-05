@@ -38,6 +38,7 @@ class IngestProfileDTO:
     passout_year: int
     dob: str
     branch: str
+    user_id: str = ""                        # Tenant ownership stored in Qdrant payload
     variants: list[VariantDTO] = field(default_factory=list)
 
 
@@ -46,6 +47,7 @@ class ProfileMatchRequestDTO:
     """Carries incoming match request data from the presentation layer."""
     job_details: str
     variant_id: Optional[str] = None   # When set, manual match path is taken
+    user_id: str = ""                  # Tenant scoping for vector search (empty = no filter)
 
 
 @dataclass

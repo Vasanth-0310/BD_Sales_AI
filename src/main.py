@@ -59,48 +59,76 @@ async def lifespan(app: FastAPI):
         finally:
             reset_log_context(*tokens)
 
+    async def _startup(app: FastAPI) -> None:
+        """All synchronous startup steps — isolated so a failure anywhere
+        inside triggers the cleanup block below (A1)."""
+        global _scheduler
+
+        # Connect to MongoDB
+        await connect(uri=settings.mongodb_uri, db_name=settings.mongodb_db_name)
+
+        # Ensure database indexes
+        repo = MongoDBSessionRepository()
+        await repo.ensure_indexes()
+
+        # Start the session refresh scheduler
+        _scheduler = SessionRefreshScheduler(session_store=repo)
+        _scheduler.start()
+
+        # ── RAG Singletons: initialize once, store on app.state ──────────────
+        logger.info("Initializing RAG components...")
+
+        # 0. MetricsRepository — shared singleton, injected into all AI adapters
+        app.state.metrics = MetricsRepository()
+
+        # 1. SemanticChunker — loads all-MiniLM-L6-v2 (~90MB) once
+        app.state.chunker = SemanticChunker()
+
+        # 2. Qdrant vector store — opens persistent async connection
+        app.state.vector_store = QdrantVectorStoreAdapter()
+
+        # 3. Gemini embedding (inner) + MongoDB-cached wrapper
+        _inner_embedding = GeminiEmbeddingAdapter()
+        app.state.embedding_port = CachedEmbeddingAdapter(
+            inner=_inner_embedding,
+            db=get_database(),
+        )
+
+        # 4. Gemini synthesizer — receives metrics for token tracking
+        app.state.synthesizer = GeminiSynthesizerAdapter(metrics=app.state.metrics)
+
+        # 5. GeminiExtractor and GeminiCompanyProfiler singletons with metrics
+        app.state.extractor = GeminiExtractor(metrics=app.state.metrics)
+        app.state.company_profiler = GeminiCompanyProfiler(metrics=app.state.metrics)
+
+        _system_log("AI components loaded successfully.")
+        _system_log("Service started and ready to accept requests.")
+
     # ── STARTUP ──────────────────────────────────────────────────────────────
     _system_log(f"'{settings.app_name}' service is starting...")
 
-    # Connect to MongoDB
-    await connect(uri=settings.mongodb_uri, db_name=settings.mongodb_db_name)
+    # A1: if ANY startup step fails, tear down everything already started
+    # before re-raising — otherwise the scheduler thread and Mongo client leak.
+    try:
+        await _startup(app)
+    except BaseException:
+        _system_log("Startup failed — cleaning up partially-started resources...")
+        try:
+            if _scheduler:
+                _scheduler.stop()
+        except Exception:
+            pass
+        try:
+            await BrowserPool.shutdown()
+            await NodriverPool.shutdown()
+        except Exception:
+            pass
+        try:
+            await disconnect()
+        except Exception:
+            pass
+        raise
 
-    # Ensure database indexes
-    repo = MongoDBSessionRepository()
-    await repo.ensure_indexes()
-
-    # Start the session refresh scheduler
-    _scheduler = SessionRefreshScheduler(session_store=repo)
-    _scheduler.start()
-
-    # ── RAG Singletons: initialize once, store on app.state ──────────────────
-    logger.info("Initializing RAG components...")
-
-    # 0. MetricsRepository — shared singleton, injected into all AI adapters
-    app.state.metrics = MetricsRepository()
-
-    # 1. SemanticChunker — loads all-MiniLM-L6-v2 (~90MB) once
-    app.state.chunker = SemanticChunker()
-
-    # 2. Qdrant vector store — opens persistent async connection
-    app.state.vector_store = QdrantVectorStoreAdapter()
-
-    # 3. Gemini embedding (inner) + MongoDB-cached wrapper
-    _inner_embedding = GeminiEmbeddingAdapter()
-    app.state.embedding_port = CachedEmbeddingAdapter(
-        inner=_inner_embedding,
-        db=get_database(),
-    )
-
-    # 4. Gemini synthesizer — receives metrics for token tracking
-    app.state.synthesizer = GeminiSynthesizerAdapter(metrics=app.state.metrics)
-
-    # 5. GeminiExtractor and GeminiCompanyProfiler singletons with metrics
-    app.state.extractor = GeminiExtractor(metrics=app.state.metrics)
-    app.state.company_profiler = GeminiCompanyProfiler(metrics=app.state.metrics)
-
-    _system_log("AI components loaded successfully.")
-    _system_log("Service started and ready to accept requests.")
     yield
 
     # ── SHUTDOWN ─────────────────────────────────────────────────────────────
@@ -124,8 +152,9 @@ async def lifespan(app: FastAPI):
     # pending transport-close callbacks before the loop exits.
     if sys.platform == "win32":
         try:
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
+            for _ in range(10):
+                await asyncio.sleep(0)
+            await asyncio.sleep(0.25)
         except Exception:
             pass
 

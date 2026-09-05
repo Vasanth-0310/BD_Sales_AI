@@ -67,4 +67,4 @@ class AnalyzeManualEntry:
 
         except Exception as e:
             logger.error(f"Manual entry analysis failed: {e}", exc_info=True)
-            return JobResultDTO.failed(reason=str(e))
+            return JobResultDTO.failed(reason="Internal error: please check server logs.")

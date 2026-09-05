@@ -20,6 +20,7 @@ class IngestProjectDTO:
 class ProjectMatchRequestDTO:
     """Carries incoming match request data from the presentation layer."""
     job_details: str                         # Plain text job description from the user
+    user_id: str = ""                        # Tenant scoping for vector search (empty = no filter)
 
 
 @dataclass

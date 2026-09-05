@@ -146,6 +146,7 @@ async def ingest_profile(
             passout_year=profile.passout_year,
             dob=profile.dob,
             branch=profile.branch,
+            user_id=user_id,
             variants=variant_dtos,
         )
 
@@ -211,6 +212,7 @@ async def match_profiles(
         dto = ProfileMatchRequestDTO(
             job_details=body.job_details,
             variant_id=body.variant_id,
+            user_id=user_id,
         )
 
         result = await use_case.execute(dto)

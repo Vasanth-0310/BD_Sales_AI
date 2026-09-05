@@ -75,8 +75,12 @@ class MatchProjectsUseCase:
             logger.debug("[STEP 3] Keyword query terms: %s", keyword_query)
 
             dense_results, keyword_results = await asyncio.gather(
-                self._vector_store_port.search_summaries_dense(query_vector, top_k=10),
-                self._vector_store_port.search_summaries_keyword(keyword_query, top_k=10),
+                self._vector_store_port.search_summaries_dense(
+                    query_vector, top_k=10, user_id=dto.user_id or None,
+                ),
+                self._vector_store_port.search_summaries_keyword(
+                    keyword_query, top_k=10, user_id=dto.user_id or None,
+                ),
             )
 
             retrieval_time = time.perf_counter() - stage1_start

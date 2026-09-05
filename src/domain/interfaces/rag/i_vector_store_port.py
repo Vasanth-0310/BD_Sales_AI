@@ -41,7 +41,10 @@ class IVectorStorePort(ABC):
         ...
 
     @abstractmethod
-    async def search_summaries_dense(self, query_vector: list[float], top_k: int = 10) -> list[dict]:
+    async def search_summaries_dense(
+        self, query_vector: list[float], top_k: int = 10,
+        user_id: str | None = None,
+    ) -> list[dict]:
         """
         Dense (cosine similarity) search on the summaries collection.
 
@@ -58,7 +61,10 @@ class IVectorStorePort(ABC):
         ...
 
     @abstractmethod
-    async def search_summaries_keyword(self, query_text: str, top_k: int = 10) -> list[dict]:
+    async def search_summaries_keyword(
+        self, query_text: str, top_k: int = 10,
+        user_id: str | None = None,
+    ) -> list[dict]:
         """
         Keyword (MatchText) search on the summaries collection.
 
@@ -144,6 +150,7 @@ class IVectorStorePort(ABC):
     @abstractmethod
     async def search_profile_variants_dense(
         self, query_vector: list[float], top_k: int = 10,
+        user_id: str | None = None,
     ) -> list[dict]:
         """
         Dense (cosine similarity) search on the profile_variants collection.
@@ -163,6 +170,7 @@ class IVectorStorePort(ABC):
     @abstractmethod
     async def search_profile_variants_keyword(
         self, query_text: str, top_k: int = 10,
+        user_id: str | None = None,
     ) -> list[dict]:
         """
         Keyword (MatchText) search on the profile_variants collection.

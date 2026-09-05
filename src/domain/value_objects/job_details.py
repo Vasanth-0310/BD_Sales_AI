@@ -2,19 +2,23 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, field_validator
 
+from src.domain.value_objects.location_info import LocationInfo, split_location
+
 
 class ClientInformation(BaseModel):
     """
     Structured contact/client block extracted from job postings.
     Maps directly to the 'Client Information' card in the UI.
     """
-    name: Optional[str] = None       # e.g. "JAMES"
-    company: Optional[str] = None    # e.g. "TechNova Solutions"
-    role: Optional[str] = None       # e.g. "Chief Executive Officer"
+    name: Optional[str] = None        # e.g. "JAMES"
+    company: Optional[str] = None     # e.g. "TechNova Solutions"
+    role: Optional[str] = None        # e.g. "Chief Executive Officer"
     designation: Optional[str] = None # e.g. "CEO" (Abbreviated version of role)
-    email: Optional[str] = None      # e.g. "james@technovasolutions.com"
-    contact: Optional[str] = None    # e.g. "+13 456 483"
-    location: Optional[str] = None   # e.g. "London, UK"
+    email: Optional[str] = None       # e.g. "james@technovasolutions.com"
+    contact: Optional[str] = None     # e.g. "+13 456 483"
+    city: Optional[str] = None        # e.g. "San Francisco"
+    state: Optional[str] = None       # e.g. "CA" or "California"
+    country: Optional[str] = None     # e.g. "USA" or "United Kingdom"
 
     model_config = {"frozen": True}
 
@@ -95,7 +99,7 @@ class JobDetails(BaseModel):
     title: str
     domain: Optional[str] = None            # Business vertical e.g. "SaaS", "FinTech", "HealthTech", "E-commerce"
     company: Optional[str] = None            # null if company cannot be definitively identified
-    location: Optional[str] = None           # null when the posting doesn't state one
+    location: Optional[LocationInfo] = None  # {city, state, country, raw} — null when not stated
     employment_type: Optional[str] = None
     industry: Optional[str] = None          # e.g. "Healthcare", "Fintech", "E-commerce"
     role: Optional[str] = None              # Standardized role name, e.g. "Mobile Developer (Cross-Platform)"
@@ -111,6 +115,14 @@ class JobDetails(BaseModel):
     apply_url: Optional[str] = None         # Direct application URL or portal link
     ai_job_summary: Optional[str] = None    # AI-generated narrative insight into the role
     required_proposal_questions: list[str] = []  # Questions the client requires in proposals
+
+    @field_validator("location", mode="before")
+    @classmethod
+    def _coerce_location(cls, v):
+        """Accept a plain string ('Bengaluru, Karnataka, India') OR a dict
+        and always store the structured LocationInfo. Keeps both the free-text
+        and structured-output paths safe."""
+        return split_location(v)
 
     @field_validator("level", mode="before")
     @classmethod

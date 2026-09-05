@@ -267,7 +267,7 @@ async def ingest_project(
         logger.error(f"Ingest failed: {e}")
         raise HTTPException(
             status_code=500,
-            detail=str(e),
+            detail="Ingest failed due to an internal error. Check server logs for details.",
         )
 
     finally:
@@ -302,7 +302,7 @@ async def match_projects(
             f"({len(body.job_details)} characters)"
         )
 
-        dto = ProjectMatchRequestDTO(job_details=body.job_details)
+        dto = ProjectMatchRequestDTO(job_details=body.job_details, user_id=user_id)
         result = await use_case.execute(dto)
 
         return ProjectMatchResponse(

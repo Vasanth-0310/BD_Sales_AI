@@ -100,10 +100,10 @@ class MatchProfilesUseCase:
 
             dense_results, keyword_results = await asyncio.gather(
                 self._vector_store_port.search_profile_variants_dense(
-                    query_vector, top_k=10,
+                    query_vector, top_k=10, user_id=dto.user_id or None,
                 ),
                 self._vector_store_port.search_profile_variants_keyword(
-                    keyword_query, top_k=10,
+                    keyword_query, top_k=10, user_id=dto.user_id or None,
                 ),
             )
 
