@@ -73,8 +73,8 @@ Rules for extraction:
 16. 'salary_info': Extract compensation ONLY if numerical figures or exact amounts are mentioned. Do NOT extract vague terms like "Competitive salary", "Negotiable", or "DOE". NEVER mix freelance/engagement metadata (project type, connects required, client activity, payment status) into salary fields.
     - 'salary_info' (object): the compensation as structured data:
         * raw (str) — the salary text EXACTLY as shown on the page (e.g. "$30.00 - $60.00 Hourly", "₹300,000 - ₹450,000 INR Yearly", "$600.00"). Null if none.
-        * min (float) — the lower number (single fixed price → min only, max null)
-        * max (float) — the upper number (null for single figures)
+        * min_pay (float) — the lower number (single fixed price → min_pay only, max_pay null)
+        * max_pay (float) — the upper number (null for single figures)
         * pay_period — EXACTLY one of: "Hourly", "Daily", "Weekly", "Biweekly", "Monthly", "Yearly", "Fixed". Normalize wording: "per year"/"annual" → "Yearly", "/hr" → "Hourly", "fixed-price" → "Fixed".
         * currency — ISO 4217 code: $ → USD, ₹ → INR, € → EUR, £ → GBP. Never a symbol.
       The whole object is null when no numerical salary exists. The numbers MUST be exactly the numbers shown on the page — never convert currencies or annualize hourly rates.
@@ -268,8 +268,8 @@ def _validate_salary(job_details: "JobDetails") -> "JobDetails":
         period = "Yearly"
 
     info = {
-        "min": p_min,
-        "max": p_max,
+        "min_pay": p_min,
+        "max_pay": p_max,
         "pay_period": period,
         "currency": currency,
         "raw": raw,

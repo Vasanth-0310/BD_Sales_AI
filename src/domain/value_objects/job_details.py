@@ -58,16 +58,17 @@ class SalaryInfo(BaseModel):
     Structured, machine-processable salary breakdown extracted from a posting.
     Lets the backend filter/compare/aggregate without parsing free text.
 
-    - min/max: floats in the NATIVE currency (no conversion) — e.g. 30.0/60.0
-      for "$30.00 - $60.00 Hourly". Single fixed price → min only, max None.
+    - min_pay/max_pay: floats in the NATIVE currency (no conversion) — e.g.
+      30.0/60.0 for "$30.00 - $60.00 Hourly". Single fixed price → min_pay
+      only, max_pay None.
     - pay_period: fixed enum so the frontend gets predictable values
       ("Hourly"/"Yearly"/... — never "per year"/"annual" leaks).
     - currency: ISO 4217 code (USD/INR/EUR/GBP/...) — never a symbol,
       since "$" alone is ambiguous between USD/CAD/AUD.
     - raw: the original salary text exactly as shown, for display.
     """
-    min: Optional[float] = None
-    max: Optional[float] = None
+    min_pay: Optional[float] = None
+    max_pay: Optional[float] = None
     pay_period: Optional[Literal[
         "Hourly", "Daily", "Weekly", "Biweekly", "Monthly", "Yearly", "Fixed"
     ]] = None
@@ -101,7 +102,7 @@ class JobDetails(BaseModel):
     experience: Optional[str] = None
     duration: Optional[str] = None          # Project/contract length, e.g. "3 to 6 months"
     level: Optional[Literal["JUNIOR", "INTERMEDIATE", "SENIOR", "EXPERT", "LEAD"]] = None
-    salary_info: Optional[SalaryInfo] = None  # Structured breakdown (min/max/period/currency)
+    salary_info: Optional[SalaryInfo] = None  # Structured breakdown (min_pay/max_pay/period/currency)
     posted_at: Optional[str] = None       # Absolute calendar date, e.g. "August 14, 2026"
     required_skills: list[str] = []         # Must-have technical skills
     preferred_skills: list[str] = []        # Nice-to-have or bonus skills
