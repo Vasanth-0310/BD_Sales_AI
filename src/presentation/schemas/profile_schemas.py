@@ -19,7 +19,7 @@ class ProjectInVariantSchema(BaseModel):
     domain: str
     tech_stack: list[str]
     links: dict[str, str] = Field(default_factory=dict)
-    description: str
+    description: str = Field(default="", max_length=20_000)
 
 
 class VariantSchema(BaseModel):
@@ -27,7 +27,7 @@ class VariantSchema(BaseModel):
     variant_id: str
     variant_title: str
     role: str
-    experience_years: int
+    experience_years: int = Field(..., ge=0, le=60)
     no_of_projects: int
     tech_stacks: list[str]
     certifications: list[str] = Field(default_factory=list)
@@ -51,7 +51,8 @@ class CandidateProfileSchema(BaseModel):
     variants: list[VariantSchema] = Field(
         ...,
         min_length=1,
-        description="At least one variant must be provided",
+        max_length=10,
+        description="At least one variant must be provided (max 10)",
     )
 
 
@@ -87,7 +88,7 @@ class IngestProfileResponse(BaseModel):
 class ProfileMatchRequest(BaseModel):
     """Request body for the profile matching endpoint."""
     user_id: str
-    job_details: str = Field(..., description="Plain text job description")
+    job_details: str = Field(..., max_length=50_000, description="Plain text job description")
     action: str = Field(default="match_profiles", description="The action to perform (default: 'match_profiles')")
     variant_id: Optional[str] = Field(
         default=None,

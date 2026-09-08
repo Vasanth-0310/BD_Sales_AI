@@ -76,10 +76,20 @@ def _load_metrics() -> dict[str, Any]:
 
 
 def _save_metrics(data: dict[str, Any]) -> None:
-    """Persist metrics dict to disk, creating parent directories if needed."""
+    """Persist metrics atomically (tmp file + os.replace).
+
+    A direct truncate-write can be interrupted by a crash/kill mid-write,
+    leaving corrupt JSON — the next load would silently reset all counters.
+    os.replace is atomic on Windows/NTFS and POSIX.
+    """
+    import os
     _METRICS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(_METRICS_FILE, "w", encoding="utf-8") as f:
+    tmp = _METRICS_FILE.with_name(_METRICS_FILE.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, _METRICS_FILE)
 
 
 class MetricsRepository:

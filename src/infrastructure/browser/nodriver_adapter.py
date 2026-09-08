@@ -225,6 +225,17 @@ class NodriverAdapter(IBrowser):
         if self._user_data_dir:
             storage_state["nodriver_profile_dir"] = self._user_data_dir
 
+        # Cloudflare binds cf_clearance to the UA that solved the challenge —
+        # automation contexts MUST present the same UA or the cookie is
+        # rejected and the site re-challenges.
+        try:
+            ua = await self._tab.evaluate("navigator.userAgent", return_by_value=True)
+            ua = self._extract_evaluate_value(ua)
+            if ua:
+                storage_state["user_agent"] = str(ua)
+        except Exception as e:
+            logger.debug(f"Could not read navigator.userAgent during capture: {e}")
+
         logger.info(f"Session captured: {len(cookies_list)} cookies.")
         return storage_state
 

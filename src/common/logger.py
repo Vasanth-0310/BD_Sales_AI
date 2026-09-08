@@ -41,6 +41,15 @@ class CredentialScrubberFilter(logging.Filter):
     """Remove credentials from every record before it is written anywhere."""
 
     def filter(self, record: logging.LogRecord) -> bool:
+        # Render %-style args NOW so non-str args (exception objects, dicts)
+        # are scrubbed too — the formatter would otherwise interpolate them
+        # AFTER this filter has run, bypassing scrubbing entirely.
+        if record.args:
+            try:
+                record.msg = str(record.msg) % record.args
+                record.args = None
+            except Exception:
+                pass  # malformed args — fall back to per-arg scrub below
         record.msg = _scrub(str(record.msg))
         if record.args:
             try:
@@ -179,10 +188,14 @@ def get_logger(name: str) -> logging.Logger:
     console_handler.setLevel(logging.DEBUG)
 
     # -------------------------------------------------------------------------
-    # File Handler
+    # File Handler (rotating: 10 MB x 5 backups — prevents unbounded disk growth)
     # -------------------------------------------------------------------------
-    file_handler = logging.FileHandler(
+    from logging.handlers import RotatingFileHandler
+
+    file_handler = RotatingFileHandler(
         "rag_pipeline.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
         encoding="utf-8",
     )
     file_handler.setLevel(logging.DEBUG)

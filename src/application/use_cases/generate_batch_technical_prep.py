@@ -75,6 +75,7 @@ class GenerateBatchTechnicalPrepUseCase:
                 single_dto = TechnicalPrepRequestDTO(
                     job_details=dto.job_details,
                     variant_id=candidate.variant_id,
+                    user_id=dto.user_id,
                     matching_skills=candidate.matching_skills,
                     missing_skills=candidate.missing_skills,
                 )

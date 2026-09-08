@@ -280,7 +280,7 @@ async def delete_candidate_profiles(
             candidate_id,
         )
 
-        count = await use_case.execute(candidate_id)
+        count = await use_case.execute(candidate_id, user_id)
 
         return DeleteProfileResponse(
             status="SUCCESS",

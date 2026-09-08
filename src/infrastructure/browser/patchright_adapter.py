@@ -39,6 +39,8 @@ class PatchrightAdapter(IBrowser):
             "viewport": {"width": 1280, "height": 800},
             # Kept in sync with the Chrome/136 UA used by CurlCFFIFetcher and
             # BrowserPool so all fetch paths present one consistent fingerprint.
+            # A captured session's user_agent OVERRIDES this: cf_clearance is
+            # UA-bound and a mismatched UA makes Cloudflare re-challenge.
             "user_agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -46,6 +48,10 @@ class PatchrightAdapter(IBrowser):
             ),
             "java_script_enabled": True,
         }
+        session_ua = (storage_state or {}).get("user_agent")
+        if isinstance(session_ua, str) and session_ua.strip():
+            context_kwargs["user_agent"] = session_ua.strip()
+        self._headless = headless
 
         if storage_state:
             from src.infrastructure.browser.storage_state_utils import sanitize_storage_state
@@ -220,7 +226,19 @@ class PatchrightAdapter(IBrowser):
             return False
 
         if "verification successful" not in body_text:
-            self._log.info("Cloudflare challenge detected. Waiting for auto-verification (up to 20s)...")
+            # Interactive challenges ("Verify you are human" — the checkbox
+            # lives inside a Turnstile IFRAME, so body text may not show it)
+            # need a human click. In a VISIBLE browser the user can solve it
+            # in place — give a generous window instead of bailing after 20s.
+            if not getattr(self, "_headless", True):
+                self._log.info(
+                    "Cloudflare challenge detected in a VISIBLE browser — waiting up to 90s. "
+                    "If a 'Verify you are human' checkbox appears, solve it in the opened window..."
+                )
+            else:
+                self._log.info("Cloudflare challenge detected. Waiting for auto-verification (up to 20s)...")
+
+        challenge_timeout_ms = 90_000 if not getattr(self, "_headless", True) else 20_000
 
         try:
             # Wait until the title changes away from the Cloudflare page AND
@@ -235,7 +253,7 @@ class PatchrightAdapter(IBrowser):
                 "    return false;"
                 "  return true;"
                 "}",
-                timeout=20000,
+                timeout=challenge_timeout_ms,
             )
             # Extra pause for the real page to fully render after redirect
             await self._page.wait_for_load_state("networkidle", timeout=8000)

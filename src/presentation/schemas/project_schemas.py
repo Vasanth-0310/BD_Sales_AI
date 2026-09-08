@@ -8,7 +8,7 @@ class ProjectDataSchema(BaseModel):
     project_name: str
     domain: str
     techstacks: list[str]
-    description: str
+    description: str = Field(..., max_length=20_000)
     links: dict[str, str] = Field(default_factory=dict)
 
 
@@ -27,7 +27,7 @@ class IngestProjectRequest(BaseModel):
 class ProjectMatchRequest(BaseModel):
     """Request body for the project matching endpoint."""
     user_id: str
-    job_details: str
+    job_details: str = Field(..., max_length=50_000)
     action: str = Field(default="match_projects", description="The action to perform (default: 'match_projects')")
 
 
@@ -65,12 +65,11 @@ class ProjectContextSchema(BaseModel):
 
 class SalesEnablementPayloadSchema(BaseModel):
     """The generation context: job description plus 1-3 matched projects."""
-    job_details: str = Field(..., description="Plain text job description")
+    job_details: str = Field(..., max_length=50_000, description="Plain text job description")
     projects: list[ProjectContextSchema] = Field(
-        ...,
-        min_length=1,
+        default_factory=list,
         max_length=3,
-        description="List of 1–3 matched projects to use as context",
+        description="List of 0–3 matched projects to use as context",
     )
 
 

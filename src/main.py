@@ -64,6 +64,20 @@ async def lifespan(app: FastAPI):
         inside triggers the cleanup block below (A1)."""
         global _scheduler
 
+        # Fast-fail on missing required configuration — a blank .env otherwise
+        # surfaces as cryptic per-request Gemini/Qdrant auth errors.
+        required = {
+            "gemini_api_key": settings.gemini_api_key,
+            "gemini_model": settings.gemini_model,
+            "qdrant_url": settings.qdrant_url,
+            "mongodb_uri": settings.mongodb_uri,
+        }
+        missing = [k for k, v in required.items() if not str(v or "").strip()]
+        if missing:
+            raise RuntimeError(
+                "Missing required configuration in .env: " + ", ".join(missing)
+            )
+
         # Connect to MongoDB
         await connect(uri=settings.mongodb_uri, db_name=settings.mongodb_db_name)
 
@@ -140,6 +154,15 @@ async def lifespan(app: FastAPI):
     # Gracefully shut down the persistent browser pools if they were started
     await BrowserPool.shutdown()
     await NodriverPool.shutdown()
+
+    # Close the Qdrant async client — its aiohttp session must be released on
+    # the live loop, else shutdown emits "Unclosed client session" warnings.
+    vector_store = getattr(app.state, "vector_store", None)
+    if vector_store is not None:
+        try:
+            await vector_store._client.close()
+        except Exception as e:
+            logger.warning(f"Qdrant client close failed: {e}")
 
     await disconnect()
 

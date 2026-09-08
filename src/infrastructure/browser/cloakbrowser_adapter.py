@@ -40,6 +40,8 @@ class CloakBrowserAdapter(PatchrightAdapter):
             "viewport": {"width": 1280, "height": 800},
             # Kept in sync with the Chrome/136 UA used by CurlCFFIFetcher and
             # BrowserPool so all fetch paths present one consistent fingerprint.
+            # A captured session's user_agent OVERRIDES this: cf_clearance is
+            # UA-bound and a mismatched UA makes Cloudflare re-challenge.
             "user_agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -47,6 +49,10 @@ class CloakBrowserAdapter(PatchrightAdapter):
             ),
             "java_script_enabled": True,
         }
+        session_ua = (storage_state or {}).get("user_agent")
+        if isinstance(session_ua, str) and session_ua.strip():
+            context_kwargs["user_agent"] = session_ua.strip()
+        self._headless = headless
 
         if storage_state:
             from src.infrastructure.browser.storage_state_utils import sanitize_storage_state

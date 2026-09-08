@@ -100,7 +100,7 @@ async def setup_scheduler(monkeypool=True, sessions=None):
             _active_tabs = 0
 
             @staticmethod
-            async def acquire(storage_state=None):
+            async def acquire(storage_state=None, if_idle: bool = False):
                 raise NotImplementedError("patched per-test")
 
             @staticmethod
@@ -146,7 +146,7 @@ async def test_refresh_paths():
 
     fresh_browser = FakePoolAdapter(HEALTHY_PAGE)
     sched._fake_pool.acquire = staticmethod(
-        lambda storage_state=None: _ret(fresh_browser))
+        lambda storage_state=None, if_idle=False: _ret(fresh_browser))
     _patch_pool_acquire(sched)
 
     await sched.refresh_all_active_sessions()
@@ -163,7 +163,7 @@ async def test_refresh_paths():
     sched2, store2 = await setup_scheduler(sessions=[s2])
     vb = FakePoolAdapter(VERIFY_PAGE)
     sched2._fake_pool.acquire = staticmethod(
-        lambda storage_state=None: _ret(vb))
+        lambda storage_state=None, if_idle=False: _ret(vb))
     _patch_pool_acquire(sched2)
     await sched2.refresh_all_active_sessions()
     check("session saved unchanged (kept)", len(store2.saved) == 1)
@@ -176,7 +176,7 @@ async def test_refresh_paths():
     sched3, store3 = await setup_scheduler(sessions=[s3])
     lb = FakePoolAdapter(LOGIN_PAGE, url="https://example.com/login?next=/x")
     sched3._fake_pool.acquire = staticmethod(
-        lambda storage_state=None: _ret(lb))
+        lambda storage_state=None, if_idle=False: _ret(lb))
     _patch_pool_acquire(sched3)
     await sched3.refresh_all_active_sessions()
     check("session marked EXPIRED",
@@ -217,7 +217,7 @@ async def test_refresh_paths():
             self.close_called = True  # pooled nodriver path: tab close + notify
 
     nb = FakeNodriverPoolAdapter()
-    sched4._fake_pool.acquire = staticmethod(lambda storage_state=None: _ret(nb))
+    sched4._fake_pool.acquire = staticmethod(lambda storage_state=None, if_idle=False: _ret(nb))
     _patch_pool_acquire(sched4)
     await sched4.refresh_all_active_sessions()
     check("nodriver tab closed via close()", nb.close_called, f"closed={nb.close_called}")
@@ -240,8 +240,10 @@ def _patch_pool_acquire(sched):
         _active_tabs = 0
 
         @staticmethod
-        async def acquire(storage_state=None):
-            return await sched._fake_pool.acquire(storage_state=storage_state)
+        async def acquire(storage_state=None, if_idle: bool = False):
+            return await sched._fake_pool.acquire(
+                storage_state=storage_state, if_idle=if_idle
+            )
 
         @staticmethod
         async def release(adapter):

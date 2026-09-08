@@ -14,8 +14,8 @@ class ManualEntryJobSchema(BaseModel):
     company_website: str = Field(default="", description="The company's website URL")
     job_title: str = Field(..., description="The title of the job role")
     experience: str = Field(default="", description="Experience required")
-    job_description: str = Field(..., description="The full job description text")
-    additional_notes: Optional[str] = Field(default=None, description="Any additional context provided by the user")
+    job_description: str = Field(..., max_length=50_000, description="The full job description text")
+    additional_notes: Optional[str] = Field(default=None, max_length=20_000, description="Any additional context provided by the user")
 
 
 class ManualEntryRequest(BaseModel):

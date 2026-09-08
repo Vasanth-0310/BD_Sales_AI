@@ -21,15 +21,17 @@ class DeleteProfileUseCase:
     def __init__(self, vector_store_port: IVectorStorePort) -> None:
         self._vector_store = vector_store_port
 
-    async def execute(self, candidate_id: str) -> int:
+    async def execute(self, candidate_id: str, user_id: str = "") -> int:
         logger.info("[DeleteProfile] Checking existence of candidate_id='%s'", candidate_id)
 
-        exists = await self._vector_store.check_candidate_exists(candidate_id)
+        # Tenant scoping: a candidate owned by another user looks "not found".
+        user = user_id or None
+        exists = await self._vector_store.check_candidate_exists(candidate_id, user)
         if not exists:
             logger.warning("[DeleteProfile] candidate_id='%s' not found — returning 404", candidate_id)
             raise CandidateNotFoundException(candidate_id)
 
         logger.info("[DeleteProfile] Deleting all variants for candidate_id='%s'...", candidate_id)
-        count = await self._vector_store.delete_profiles_by_candidate_id(candidate_id)
+        count = await self._vector_store.delete_profiles_by_candidate_id(candidate_id, user)
         logger.info("[DeleteProfile] candidate_id='%s' — %d variant(s) deleted.", candidate_id, count)
         return count

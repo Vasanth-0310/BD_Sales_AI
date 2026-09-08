@@ -88,6 +88,7 @@ async def generate_technical_prep(
 
         dto = BatchTechnicalPrepRequestDTO(
             job_details=payload.job_details,
+            user_id=body.user_id,
             candidates=[
                 CandidateInputDTO(
                     variant_id=c.variant_id,

@@ -69,7 +69,7 @@ class GenerateTechnicalPrepUseCase:
             )
             fetch_start = time.perf_counter()
             profile_payload = await self._vector_store_port.fetch_profile_variant_by_id(
-                dto.variant_id
+                dto.variant_id, user_id=dto.user_id or None,
             )
             fetch_time = time.perf_counter() - fetch_start
 

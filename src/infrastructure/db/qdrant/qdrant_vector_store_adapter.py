@@ -378,22 +378,27 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         wait=wait_exponential(multiplier=1, min=2, max=10),
         reraise=True,
     )
-    async def delete_project(self, project_id: str) -> None:
+    async def delete_project(self, project_id: str, user_id: str | None = None) -> None:
         """Delete all data for a project from both collections."""
         start = time.perf_counter()
         try:
+            # Tenant guard: AND the owner filter onto the project_id condition
+            # (legacy points without user_id stay deletable by their owner).
+            must_base = [
+                FieldCondition(
+                    key="project_id",
+                    match=MatchValue(value=project_id),
+                )
+            ]
+            tenant = self._tenant_filter(user_id)
+            if tenant is not None:
+                must_base.append(tenant)
+
             # Delete from summary collection (filter by project_id payload)
             await self._client.delete(
                 collection_name=self._summary_collection,
                 points_selector=models.FilterSelector(
-                    filter=Filter(
-                        must=[
-                            FieldCondition(
-                                key="project_id",
-                                match=MatchValue(value=project_id),
-                            )
-                        ]
-                    )
+                    filter=Filter(must=must_base)
                 ),
             )
 
@@ -401,14 +406,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
             await self._client.delete(
                 collection_name=self._chunks_collection,
                 points_selector=models.FilterSelector(
-                    filter=Filter(
-                        must=[
-                            FieldCondition(
-                                key="project_id",
-                                match=MatchValue(value=project_id),
-                            )
-                        ]
-                    )
+                    filter=Filter(must=must_base)
                 ),
             )
 
@@ -639,7 +637,9 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         wait=wait_exponential(multiplier=1, min=2, max=10),
         reraise=True,
     )
-    async def fetch_profile_variant_by_id(self, variant_id: str) -> dict | None:
+    async def fetch_profile_variant_by_id(
+        self, variant_id: str, user_id: str | None = None,
+    ) -> dict | None:
         """Fetch a single profile variant payload directly by its variant_id.
 
         Since variant_id is stored as the Qdrant point ID during upsert,
@@ -673,7 +673,19 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
                 )
                 return None
 
-            payload = points[0].payload
+            payload = points[0].payload or {}
+
+            # Tenant guard: refuse payloads owned by a different user.
+            # Legacy payloads without user_id remain accessible.
+            owner = payload.get("user_id")
+            if user_id and owner and owner != user_id:
+                logger.warning(
+                    "fetch_profile_variant_by_id  |  variant_id=%s belongs to "
+                    "another tenant — access denied.",
+                    variant_id,
+                )
+                return None
+
             logger.info(
                 "fetch_profile_variant_by_id completed in %.3fs  |  "
                 "variant_id=%s  candidate=%s",
@@ -698,19 +710,24 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         wait=wait_exponential(multiplier=1, min=2, max=10),
         reraise=True,
     )
-    async def check_project_exists(self, project_id: str) -> bool:
+    async def check_project_exists(
+        self, project_id: str, user_id: str | None = None,
+    ) -> bool:
         """Check whether a project exists in the Summary collection by payload project_id."""
+        start = time.perf_counter()
         try:
+            must_base = [
+                FieldCondition(
+                    key="project_id",
+                    match=MatchValue(value=project_id),
+                )
+            ]
+            tenant = self._tenant_filter(user_id)
+            if tenant is not None:
+                must_base.append(tenant)
             results, _ = await self._client.scroll(
                 collection_name=self._summary_collection,
-                scroll_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="project_id",
-                            match=MatchValue(value=project_id),
-                        )
-                    ]
-                ),
+                scroll_filter=Filter(must=must_base),
                 limit=1,
                 with_payload=False,
                 with_vectors=False,
@@ -732,19 +749,24 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         wait=wait_exponential(multiplier=1, min=2, max=10),
         reraise=True,
     )
-    async def check_candidate_exists(self, candidate_id: str) -> bool:
+    async def check_candidate_exists(
+        self, candidate_id: str, user_id: str | None = None,
+    ) -> bool:
         """Check whether any profile variant exists for the given candidate_id."""
+        start = time.perf_counter()
         try:
+            must_base = [
+                FieldCondition(
+                    key="candidate_id",
+                    match=MatchValue(value=candidate_id),
+                )
+            ]
+            tenant = self._tenant_filter(user_id)
+            if tenant is not None:
+                must_base.append(tenant)
             results, _ = await self._client.scroll(
                 collection_name=self._profile_collection,
-                scroll_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="candidate_id",
-                            match=MatchValue(value=candidate_id),
-                        )
-                    ]
-                ),
+                scroll_filter=Filter(must=must_base),
                 limit=1,
                 with_payload=False,
                 with_vectors=False,
@@ -766,18 +788,22 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         wait=wait_exponential(multiplier=1, min=2, max=10),
         reraise=True,
     )
-    async def delete_profiles_by_candidate_id(self, candidate_id: str) -> int:
+    async def delete_profiles_by_candidate_id(
+        self, candidate_id: str, user_id: str | None = None,
+    ) -> int:
         """Delete all profile variants for a candidate. Returns the count deleted."""
         start = time.perf_counter()
         try:
-            candidate_filter = Filter(
-                must=[
-                    FieldCondition(
-                        key="candidate_id",
-                        match=MatchValue(value=candidate_id),
-                    )
-                ]
-            )
+            must_base = [
+                FieldCondition(
+                    key="candidate_id",
+                    match=MatchValue(value=candidate_id),
+                )
+            ]
+            tenant = self._tenant_filter(user_id)
+            if tenant is not None:
+                must_base.append(tenant)
+            candidate_filter = Filter(must=must_base)
 
             # Scroll through all matching points to count them
             all_points = []

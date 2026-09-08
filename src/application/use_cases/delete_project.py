@@ -20,14 +20,16 @@ class DeleteProjectUseCase:
     def __init__(self, vector_store_port: IVectorStorePort) -> None:
         self._vector_store = vector_store_port
 
-    async def execute(self, project_id: str) -> None:
+    async def execute(self, project_id: str, user_id: str = "") -> None:
         logger.info("[DeleteProject] Checking existence of project_id='%s'", project_id)
 
-        exists = await self._vector_store.check_project_exists(project_id)
+        # Tenant scoping: a project owned by another user looks "not found".
+        user = user_id or None
+        exists = await self._vector_store.check_project_exists(project_id, user)
         if not exists:
             logger.warning("[DeleteProject] project_id='%s' not found — returning 404", project_id)
             raise ProjectNotFoundException(project_id)
 
         logger.info("[DeleteProject] Deleting project_id='%s' from vector store...", project_id)
-        await self._vector_store.delete_project(project_id)
+        await self._vector_store.delete_project(project_id, user)
         logger.info("[DeleteProject] project_id='%s' deleted successfully.", project_id)

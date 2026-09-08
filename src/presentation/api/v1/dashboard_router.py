@@ -54,7 +54,16 @@ async def get_metrics(request: Request):
             detail="Metrics repository not initialized.",
         )
 
-    data = await metrics_repo.get_metrics()
+    try:
+        data = await metrics_repo.get_metrics()
+    except Exception as e:
+        logger.error(f"[Dashboard] Failed to read API metrics: {e}")
+        # No internal details in the response — full error is in the log.
+        raise HTTPException(
+            status_code=503,
+            detail="Could not read API usage metrics. "
+                   "Check server logs for details.",
+        )
 
     return {
         "status": "success",
@@ -108,6 +117,10 @@ def _tail_file(
 
     if len(lines) > n:
         lines = lines[-n:]
+    # If we stopped mid-file, the first element may be a chunk-boundary
+    # fragment of a longer line — drop it rather than emit a truncated line.
+    if pos > 0 and lines and len(lines) >= n:
+        lines = lines[1:]
 
     return [
         line.decode(

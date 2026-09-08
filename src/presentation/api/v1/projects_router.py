@@ -238,7 +238,15 @@ async def ingest_project(
                 ),
             )
 
+        # Cap the read: a multi-GB upload would otherwise be buffered fully
+        # in RAM per request.
+        _MAX_CASE_STUDY_BYTES = 20 * 1024 * 1024  # 20 MB
         file_bytes = await case_study.read()
+        if len(file_bytes) > _MAX_CASE_STUDY_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="Case study file too large (max 20 MB).",
+            )
 
         # ── Build DTO ──────────────────────────────────────────────
         dto = IngestProjectDTO(
@@ -395,7 +403,7 @@ async def delete_project(
     )
     logger.info("Removing project '%s' from the knowledge base", project_id)
     try:
-        await use_case.execute(project_id)
+        await use_case.execute(project_id, user_id)
         return DeleteProjectResponse(
             status="SUCCESS",
             message=f"Project '{project_id}' and all its data have been deleted.",

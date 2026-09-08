@@ -20,6 +20,7 @@ class TechnicalPrepPayloadSchema(BaseModel):
     send N, get N results (processed sequentially)."""
     job_details: str = Field(
         ...,
+        max_length=50_000,
         description="Plain text job description (same one used in Steps 2 and 3).",
     )
     candidates: list[CandidateInputSchema] = Field(

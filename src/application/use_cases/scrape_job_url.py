@@ -544,6 +544,13 @@ class ScrapeJobURL:
         engines.append(("cloakbrowser-pool", _pool_launcher))
         engines.append(("browser-factory", _factory_launcher))
 
+        # The nodriver warm tab can die mid-navigation (renderer crash on a
+        # Cloudflare-heavy page, "Connection closed"). The warm process is
+        # then a zombie that EVERY retry would reuse — so on this specific
+        # failure we discard the warm browser and retry the SAME engine once
+        # with a fresh launch before moving on.
+        retried_engines: set[str] = set()
+
         for engine_name, launcher in engines:
             browser = None
             try:
@@ -576,6 +583,34 @@ class ScrapeJobURL:
                     f"([{type(nav_err).__name__}] {nav_err}). Trying next engine..."
                 )
                 await self._close_quietly(browser)
+                # Self-heal a dead warm browser: discard it and retry this
+                # engine exactly once with a fresh launch.
+                if (
+                    engine_name.startswith("nodriver-profile")
+                    and "connection closed" in str(nav_err).lower()
+                    and engine_name not in retried_engines
+                ):
+                    retried_engines.add(engine_name)
+                    try:
+                        if storage_state:
+                            raw_profile = (
+                                storage_state.get("nodriver_profile_dir")
+                                or storage_state.get("profile_dir")
+                            )
+                            if raw_profile:
+                                from src.infrastructure.browser.nodriver_pool import NodriverPool
+
+                                await NodriverPool.discard(str(Path(str(raw_profile)).resolve()))
+                    except Exception as discard_err:
+                        logger.warning(
+                            f"NodriverPool discard failed ({discard_err}) — "
+                            f"cold start will handle it."
+                        )
+                    engines.append((f"{engine_name}-retry", launcher))
+                    logger.info(
+                        f"Engine '{engine_name}' browser died mid-navigation — "
+                        f"discarded warm Chrome; retrying with a fresh launch."
+                    )
                 continue
 
             # ── Redirect identity check (LinkedIn expired postings) ────────

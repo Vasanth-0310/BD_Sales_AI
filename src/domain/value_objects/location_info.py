@@ -36,11 +36,23 @@ _PINCODE_COUNTRY_RE = re.compile(r"^(\d{4,7})\s*([A-Za-z]{2})$")
 _COMPOUND_SEPARATORS = (";", " / ", " and ", "|")
 
 
+# 2-letter tokens that are countries but NOT US-state abbreviations.
+# Ambiguous overlaps (CA, CO, ID, IN, NE, GA, ...) are intentionally
+# excluded: position rules then classify them as state, matching the
+# dominant "City, ST" convention in job postings.
+_ISO2_UNAMBIGUOUS = {
+    "ae", "at", "au", "be", "bh", "br", "ch", "cl", "cn", "cr", "cz",
+    "dk", "eg", "es", "fi", "fr", "gb", "gr", "hk", "hr", "hu", "ie",
+    "it", "jp", "ke", "kr", "kw", "lk", "lt", "lu", "lv", "ma", "mx",
+    "my", "ng", "nl", "no", "np", "nz", "om", "pe", "ph", "pk", "pl",
+    "pt", "qa", "ro", "rs", "ru", "sa", "se", "sg", "si", "sk", "th",
+    "tn", "tr", "tw", "ua", "us", "uy", "uz", "vn", "za",
+}
+
+
 def _is_country(token: str) -> bool:
     t = token.strip().lower().rstrip(".")
-    return t in _KNOWN_COUNTRIES or (
-        len(t) == 2 and t.isalpha() and t.upper() == t
-    )
+    return t in _KNOWN_COUNTRIES or (len(t) == 2 and t in _ISO2_UNAMBIGUOUS)
 
 
 def _split_text(text: str) -> dict:
@@ -113,13 +125,16 @@ def split_location(value: Any) -> Optional["LocationInfo"]:
         return value
 
     if isinstance(value, dict):
-        clean = {
-            k: (str(value.get(k)).strip()
-                if value.get(k) and str(value.get(k)).strip() else None)
-            for k in ("city", "state", "country")
-        }
-        raw = value.get("raw")
-        raw = (str(raw).strip() if raw and str(raw).strip() else None)
+        def _clean_str(v: Any) -> Optional[str]:
+            # Only accept real strings — never stringify lists/ints that a
+            # misbehaving LLM put in a component field.
+            if isinstance(v, str):
+                s = v.strip()
+                return s or None
+            return None
+
+        clean = {k: _clean_str(value.get(k)) for k in ("city", "state", "country")}
+        raw = _clean_str(value.get("raw"))
 
         # Backfill null components from the raw text — never override a value
         # the LLM actually provided.

@@ -52,11 +52,6 @@ class GenerateSalesEnablementUseCase:
                     reason="job_details must not be empty."
                 )
 
-            if not dto.projects:
-                return SalesEnablementResponseDTO.failed(
-                    reason="At least one project must be provided."
-                )
-
             logger.info("[STEP 2] Calling Gemini to generate sales enablement content")
             gemini_start = time.perf_counter()
             result = await self._synthesizer_port.generate_sales_enablement(

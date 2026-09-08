@@ -99,10 +99,22 @@ class _BrowserPool:
                 None, pids_with_cmdline_marker, self._POOL_MARKER_ARG
             )
             self._window_pids = pids
-            if pids:
-                await hide_windows_when_visible(pids)
-            else:
+            if not pids:
                 logger.warning("BrowserPool: no chrome.exe found with the pool marker — window not hidden.")
+                return
+            # RACE GUARD: the hide task resolves its PIDs asynchronously — a
+            # scrape may have acquired a tab in between (its show-window call
+            # ran while _window_pids was still empty and thus did nothing).
+            # Never hide while tabs are in flight: an invisible browser makes
+            # interactive Cloudflare challenges unsolvable.
+            if self._active_tabs > 0:
+                logger.debug(
+                    "BrowserPool: skipping idle-hide — %d tab(s) in flight "
+                    "(window stays visible for the active scrape).",
+                    self._active_tabs,
+                )
+                return
+            await hide_windows_when_visible(pids)
 
         try:
             self._hide_task = _asyncio.create_task(_hide())
@@ -200,18 +212,44 @@ class _BrowserPool:
         from src.infrastructure.browser.patchright_adapter import PatchrightAdapter
         return PatchrightAdapter()
 
-    async def acquire(self, storage_state: dict[str, Any] | None = None):
+    async def acquire(self, storage_state: dict[str, Any] | None = None, if_idle: bool = False):
         """
         Return an adapter backed by a fresh tab in the shared browser.
         The adapter's launch() is skipped — the browser is already running.
         Caller must call release(adapter) when done.
+
+        if_idle=True: refuse (return None) when any tab is already in flight.
+        The idle check and the slot reservation happen atomically under
+        self._lock, so a concurrent scrape can never slip in between the
+        check and the tab being issued (closes the scheduler TOCTOU race).
         """
-        browser = await self._ensure_browser()
+        reserved_slot = False
+        if if_idle:
+            async with self._lock:
+                if self._active_tabs != 0:
+                    logger.info(
+                        "BrowserPool: busy (%d active tab(s)) — idle-only acquire refused.",
+                        self._active_tabs,
+                    )
+                    return None
+                # Reserve the slot atomically with the idle check.
+                self._active_tabs += 1
+                reserved_slot = True
+
+        try:
+            browser = await self._ensure_browser()
+        except Exception:
+            if reserved_slot:
+                async with self._lock:
+                    self._active_tabs -= 1
+            raise
 
         context_kwargs: dict[str, Any] = {
             "viewport": {"width": 1280, "height": 800},
             # Kept in sync with the Chrome/136 UA used by CurlCFFIFetcher so all
-            # fetch paths present one consistent browser fingerprint.
+            # fetch paths present one consistent browser fingerprint. A captured
+            # session's user_agent OVERRIDES this: cf_clearance is UA-bound and
+            # a mismatched UA makes Cloudflare re-challenge.
             "user_agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -219,19 +257,43 @@ class _BrowserPool:
             ),
             "java_script_enabled": True,
         }
+        session_ua = (storage_state or {}).get("user_agent")
+        if isinstance(session_ua, str) and session_ua.strip():
+            context_kwargs["user_agent"] = session_ua.strip()
         if storage_state:
             from src.infrastructure.browser.storage_state_utils import sanitize_storage_state
 
             context_kwargs["storage_state"] = sanitize_storage_state(storage_state)
 
-        context = await browser.new_context(**context_kwargs)
         try:
-            page = await context.new_page()
-        except Exception:
             try:
-                await context.close()
+                context = await browser.new_context(**context_kwargs)
+            except Exception as e:
+                # The shared Chromium can die between _ensure_browser()'s
+                # is_connected() check and this call (crash/OOM/user kill).
+                # Self-heal once instead of failing the request — mirrors
+                # NodriverPool.acquire.
+                if browser.is_connected():
+                    raise
+                logger.warning(
+                    f"BrowserPool: browser died during acquire ({e}). Relaunching once..."
+                )
+                async with self._lock:
+                    self._browser = None
+                browser = await self._ensure_browser()
+                context = await browser.new_context(**context_kwargs)
+            try:
+                page = await context.new_page()
             except Exception:
-                pass
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+                raise
+        except Exception:
+            if reserved_slot:
+                async with self._lock:
+                    self._active_tabs -= 1
             raise
 
         # Build an adapter and inject the already-running browser/context/page
@@ -242,11 +304,14 @@ class _BrowserPool:
         adapter._context = context               # owned by this tab — will be closed on release
         adapter._page = page                     # owned by this tab — will be closed on release
         adapter._pool_managed = True             # sentinel so close() knows it's pool-managed
+        adapter._headless = settings.browser_cloak_headless  # pool browser runs headed/non-headed per config
 
-        # Track the in-flight tab BEFORE showing the window: with concurrent
-        # scrapes, an early release() must never hide the window while another
-        # scrape is still using the pool.
-        self._active_tabs += 1
+        if not reserved_slot:
+            # Track the in-flight tab BEFORE showing the window: with concurrent
+            # scrapes, an early release() must never hide the window while another
+            # scrape is still using the pool. (if_idle acquires already reserved
+            # the slot under the lock.)
+            self._active_tabs += 1
 
         # Pop the idle-hidden pool window back up for this scrape (idempotent)
         self._show_window_if_hidden()
@@ -271,12 +336,16 @@ class _BrowserPool:
         except Exception as e:
             logger.warning(f"BrowserPool: Error releasing tab: {e}")
         finally:
-            # Only hide the window when the LAST active tab is done — otherwise
-            # concurrent scrapes would hide each other's window mid-run.
-            if self._active_tabs > 0:
-                self._active_tabs -= 1
-            if self._active_tabs == 0:
-                self.hide_window_now()
+            # Only pool-managed adapters that haven't already been released
+            # may decrement the in-flight counter — a double release() (or a
+            # foreign adapter) must not drive the count to 0 and hide the
+            # window under a live scrape.
+            if getattr(adapter, "_pool_managed", False):
+                adapter._pool_managed = False  # consume the sentinel: one decrement per acquire()
+                if self._active_tabs > 0:
+                    self._active_tabs -= 1
+                if self._active_tabs == 0:
+                    self.hide_window_now()
 
     async def shutdown(self) -> None:
         """Stop the shared browser. Call this on server shutdown."""

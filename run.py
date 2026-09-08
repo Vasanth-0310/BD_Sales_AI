@@ -14,7 +14,7 @@ import os
 
 # The MiniLM chunker model is already cached locally — skip huggingface.co
 # version checks so startup doesn't burn ~23s in DNS retries when offline.
-os.environ.setdefault("HF_HUB_OFFLINE", "0")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 # MUST be set before uvicorn creates any event loop
 if sys.platform == "win32":

@@ -62,7 +62,10 @@ class CachedEmbeddingAdapter(IEmbeddingPort):
         """
         from src.common.config import settings
 
-        scope = f"{settings.gemini_model}|{settings.qdrant_vector_size}|{mode}"
+        # Scope to the EMBEDDING model, not settings.gemini_model (the chat
+        # model) — switching the chat model must not invalidate the vector
+        # cache, and an actual embedding-model change WILL be detected.
+        scope = f"gemini-embedding-001|{settings.qdrant_vector_size}|{mode}"
         return hashlib.sha256(f"{scope}::{text}".encode("utf-8")).hexdigest()
 
     async def _lookup(self, text_hash: str) -> list[float] | None:

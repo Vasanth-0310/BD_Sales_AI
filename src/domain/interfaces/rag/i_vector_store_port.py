@@ -99,13 +99,15 @@ class IVectorStorePort(ABC):
         ...
 
     @abstractmethod
-    async def delete_project(self, project_id: str) -> None:
+    async def delete_project(self, project_id: str, user_id: str | None = None) -> None:
         """
         Delete all vectors (summary + chunks) for a given project ID
         from both collections.
 
         Args:
             project_id: The project ID whose data should be purged.
+            user_id: Optional tenant scoping — deletes only points owned by
+                this user (or legacy points without an owner).
 
         Raises:
             VectorStoreError: If the delete operation fails.
@@ -189,7 +191,9 @@ class IVectorStorePort(ABC):
         ...
 
     @abstractmethod
-    async def fetch_profile_variant_by_id(self, variant_id: str) -> dict | None:
+    async def fetch_profile_variant_by_id(
+        self, variant_id: str, user_id: str | None = None,
+    ) -> dict | None:
         """
         Fetch a single profile variant's full payload from Qdrant by its
         variant_id, without performing a vector search.
@@ -207,7 +211,9 @@ class IVectorStorePort(ABC):
         ...
 
     @abstractmethod
-    async def check_project_exists(self, project_id: str) -> bool:
+    async def check_project_exists(
+        self, project_id: str, user_id: str | None = None,
+    ) -> bool:
         """
         Check whether a project with the given project_id exists in the
         summaries collection.
@@ -224,7 +230,9 @@ class IVectorStorePort(ABC):
         ...
 
     @abstractmethod
-    async def check_candidate_exists(self, candidate_id: str) -> bool:
+    async def check_candidate_exists(
+        self, candidate_id: str, user_id: str | None = None,
+    ) -> bool:
         """
         Check whether any profile variant exists for the given candidate_id
         in the profile_variants collection.
@@ -241,7 +249,9 @@ class IVectorStorePort(ABC):
         ...
 
     @abstractmethod
-    async def delete_profiles_by_candidate_id(self, candidate_id: str) -> int:
+    async def delete_profiles_by_candidate_id(
+        self, candidate_id: str, user_id: str | None = None,
+    ) -> int:
         """
         Delete all profile variants for a given candidate_id from the
         profile_variants collection.

@@ -142,6 +142,21 @@ class GeminiEmbeddingAdapter(IEmbeddingPort):
         wait=wait_exponential(multiplier=1, min=2, max=10),
         reraise=True,
     )
+    async def _embed_single_batch(self, batch: list[str]):
+        """One embed_content round-trip with its own retry budget.
+
+        Retrying per-batch (not the whole loop) means a failure in batch N
+        doesn't re-embed — and re-pay quota for — batches 0..N-1, nor re-sleep
+        the 62s free-tier pauses for them."""
+        return await self._client.aio.models.embed_content(
+            model=self._model,
+            contents=batch,
+            config=types.EmbedContentConfig(
+                task_type="RETRIEVAL_DOCUMENT",
+                output_dimensionality=settings.qdrant_vector_size,
+            ),
+        )
+
     async def embed_documents_batch(
         self, texts: list[str],
     ) -> list[list[float]]:
@@ -194,14 +209,7 @@ class GeminiEmbeddingAdapter(IEmbeddingPort):
                     )
                     await asyncio.sleep(62)
 
-                response = await self._client.aio.models.embed_content(
-                    model=self._model,
-                    contents=batch,
-                    config=types.EmbedContentConfig(
-                        task_type="RETRIEVAL_DOCUMENT",
-                        output_dimensionality=settings.qdrant_vector_size,
-                    ),
-                )
+                response = await self._embed_single_batch(batch)
                 vectors.extend(e.values for e in response.embeddings)
         except Exception as exc:
             logger.error(

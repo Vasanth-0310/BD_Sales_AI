@@ -170,6 +170,29 @@ class _NodriverPool:
         )
         return adapter
 
+    async def discard(self, profile_dir: str) -> None:
+        """Throw away a broken warm browser so the next acquire() relaunches.
+
+        Called when a pooled tab dies mid-navigation (ConnectionClosed) —
+        the CDP websocket is dead but stop-on-close bookkeeping hasn't run,
+        so without this every subsequent acquire reuses the zombie process.
+        """
+        profile_dir = str(Path(profile_dir).resolve())
+        browser = self._browsers.pop(profile_dir, None)
+        if browser is None:
+            return
+        try:
+            await browser.aclose()  # proper async variant of stop()
+        except Exception:
+            try:
+                browser.stop()
+            except Exception as e:
+                logger.warning(
+                    f"NodriverPool: discard of {profile_dir} failed ({e}) — "
+                    f"PID backstop: {getattr(browser._process, 'pid', '?')}."
+                )
+        logger.info(f"NodriverPool: discarded broken warm Chrome for {profile_dir}.")
+
     def notify_tab_closed(self, profile_dir: str | None) -> None:
         """
         Account for a closed pooled tab. The idle window is re-hidden only when

@@ -100,7 +100,19 @@ class SessionRefreshScheduler:
 
             raw_profile = session.storage_state.get("nodriver_profile_dir") or session.storage_state.get("profile_dir")
             profile_path = Path(str(raw_profile)).resolve()
-            if profile_path.exists() and any(profile_path.iterdir()):
+            usable_profile = False
+            try:
+                # exists() is True for a FILE or an unreadable dir — iterdir()
+                # would raise NotADirectoryError/PermissionError. Any such
+                # failure simply means "no usable profile" (mirrors
+                # scrape_job_url._has_usable_nodriver_profile).
+                usable_profile = profile_path.is_dir() and any(profile_path.iterdir())
+            except OSError as e:
+                logger.warning(
+                    f"Saved Chrome profile '{profile_path}' unreadable ({e}) — "
+                    "falling back to shared pool."
+                )
+            if usable_profile:
                 # MUST go through NodriverPool — Chrome locks the profile dir,
                 # and a cold uc.start() would collide with the warm pooled
                 # process and corrupt profile state.
@@ -122,21 +134,20 @@ class SessionRefreshScheduler:
             # are pool-managed: close() only closes the tab, never the browser.
             from src.infrastructure.browser.browser_pool import BrowserPool
 
-            # RACE GUARD: never grab a tab from the shared pool while user
-            # scrapes are in flight — the refresh navigation would hijack the
-            # page state of an in-flight scrape (and vice versa). Fall back to
-            # a standalone browser instead.
-            if getattr(BrowserPool, "_active_tabs", 0) == 0:
-                try:
-                    browser = await BrowserPool.acquire(storage_state=session.storage_state)
-                except Exception as e:
-                    logger.warning(f"Pool acquire failed ({e}). Launching a standalone browser.")
-                    browser = None
-            else:
-                logger.info(
-                    "Shared pool busy (%d active tabs) — using standalone browser for refresh.",
-                    BrowserPool._active_tabs,
+            # RACE GUARD (atomic): if_idle=True performs the busy-check AND the
+            # slot reservation under the pool's lock — a scrape starting in the
+            # same instant can no longer slip between check and acquire, so the
+            # refresh can never hijack an in-flight scrape's page state.
+            # Returns None when the pool is busy → standalone browser instead.
+            try:
+                browser = await BrowserPool.acquire(
+                    storage_state=session.storage_state, if_idle=True
                 )
+            except Exception as e:
+                logger.warning(f"Pool acquire failed ({e}). Launching a standalone browser.")
+                browser = None
+            if browser is None:
+                logger.info("Shared pool busy or unavailable — using standalone browser for refresh.")
             if browser is None:
                 browser = await BrowserFactory.launch_browser(
                     headless=settings.browser_cloak_headless, storage_state=session.storage_state

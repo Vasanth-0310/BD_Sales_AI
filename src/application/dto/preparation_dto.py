@@ -20,6 +20,7 @@ class TechnicalPrepRequestDTO:
     """
     job_details: str
     variant_id: str
+    user_id: str = ""   # Tenant scoping for the variant fetch (empty = no filter)
     matching_skills: list[str] = field(default_factory=list)
     missing_skills: list[str] = field(default_factory=list)
 
@@ -68,6 +69,7 @@ class CandidateInputDTO:
 class BatchTechnicalPrepRequestDTO:
     """Carries batch tech prep request data from the presentation layer."""
     job_details: str
+    user_id: str = ""   # Tenant scoping, forwarded to each per-candidate prep
     candidates: list[CandidateInputDTO] = field(default_factory=list)
 
 

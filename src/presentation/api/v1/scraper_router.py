@@ -111,15 +111,14 @@ async def scrape_job(
         try:
             raw_domain = DomainURL(str(body.url)).domain
             parts = raw_domain.split(".")
+            # Generic second-level labels — the brand label sits one position
+            # further left for these (covers co.uk/com.au/ac.uk/edu.au/gov.in).
+            _generic_second_level = {"co", "com", "org", "net", "ac", "edu", "gov"}
 
-            if len(parts) >= 2:
-                if (
-                    parts[-2] in ["co", "com", "org", "net"]
-                    and len(parts) >= 3
-                ):
-                    platform = parts[-3]
-                else:
-                    platform = parts[-2]
+            if len(parts) >= 3 and parts[-2] in _generic_second_level:
+                platform = parts[-3]
+            elif len(parts) >= 2:
+                platform = parts[-2]
             else:
                 platform = raw_domain
 

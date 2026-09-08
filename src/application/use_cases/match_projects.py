@@ -87,8 +87,10 @@ class MatchProjectsUseCase:
             logger.info(f"[STEP 3] Stage 1 retrieval completed in {retrieval_time:.2f}s")
             
             # Log retrieved items
-            dense_pids = [r["payload"]["project_id"] for r in dense_results]
-            keyword_pids = [r["payload"]["project_id"] for r in keyword_results]
+            dense_pids = [r["payload"]["project_id"] for r in dense_results
+                          if isinstance(r.get("payload"), dict) and r["payload"].get("project_id")]
+            keyword_pids = [r["payload"]["project_id"] for r in keyword_results
+                            if isinstance(r.get("payload"), dict) and r["payload"].get("project_id")]
             logger.debug(f"Retrieved Dense Project IDs: {dense_pids}")
             logger.debug(f"Retrieved Keyword Project IDs: {keyword_pids}")
             logger.info(f"[STEP 3] Retrieved {len(dense_results)} dense results and {len(keyword_results)} keyword results")
@@ -96,11 +98,12 @@ class MatchProjectsUseCase:
             logger.info("[STEP 4] Starting candidate deduplication and merging")
             candidates_map: dict[str, dict] = {}
             for result in dense_results:
-                pid = result["payload"]["project_id"]
-                candidates_map[pid] = result
+                pid = (result.get("payload") or {}).get("project_id")
+                if pid:
+                    candidates_map[pid] = result
             for result in keyword_results:
-                pid = result["payload"]["project_id"]
-                if pid not in candidates_map:
+                pid = (result.get("payload") or {}).get("project_id")
+                if pid and pid not in candidates_map:
                     candidates_map[pid] = result
             
             candidates = list(candidates_map.values())
@@ -120,6 +123,7 @@ class MatchProjectsUseCase:
             dense_ranking = [
                 (r["payload"]["project_id"], r["score"])
                 for r in sorted(dense_results, key=lambda x: x["score"], reverse=True)
+                if isinstance(r.get("payload"), dict) and r["payload"].get("project_id")
             ]
             bm25_ranking = [
                 (pid, score)
@@ -230,7 +234,10 @@ class MatchProjectsUseCase:
         """
         by_project: dict[str, list[dict]] = {}
         for r in sorted(chunk_results, key=lambda x: x["score"], reverse=True):
-            by_project.setdefault(r["payload"]["project_id"], []).append(r["payload"])
+            pid = (r.get("payload") or {}).get("project_id")
+            if not pid:
+                continue  # malformed/legacy point — skip rather than crash
+            by_project.setdefault(pid, []).append(r["payload"])
 
         selected: list[dict] = []
         for round_idx in range(_MAX_EVIDENCE_PER_PROJECT):

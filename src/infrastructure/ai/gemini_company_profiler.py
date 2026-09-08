@@ -197,6 +197,14 @@ class GeminiCompanyProfiler:
         hedge_delay = settings.gemini_hedge_delay_s
 
         primary = asyncio.ensure_future(self._call_gemini(prompt))
+        if hedge_delay <= 0:
+            # 0 disables hedging — still bound the single call so a hung
+            # socket can't stall forever.
+            _call_timeout = settings.gemini_call_timeout_s
+            return await asyncio.wait_for(
+                asyncio.shield(primary),
+                timeout=_call_timeout if _call_timeout > 0 else None,
+            )
         try:
             return await asyncio.wait_for(asyncio.shield(primary), timeout=hedge_delay)
         except asyncio.TimeoutError:

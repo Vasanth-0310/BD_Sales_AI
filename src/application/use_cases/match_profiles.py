@@ -164,6 +164,7 @@ class MatchProfilesUseCase:
             dense_ranking = [
                 (r["payload"]["variant_id"], r["score"])
                 for r in sorted(dense_results, key=lambda x: x["score"], reverse=True)
+                if isinstance(r.get("payload"), dict) and r["payload"].get("variant_id")
             ]
             bm25_ranking = [
                 (vid, score)
@@ -301,6 +302,7 @@ class MatchProfilesUseCase:
             # recommendations — mirrors project_match_min_score. Set to 0
             # in settings to disable the filter entirely.
             min_pct = settings.profile_match_min_percentage
+            pre_filter_pool = list(deduped)  # closest-match hint needs the unfiltered pool
             if min_pct > 0:
                 before = len(deduped)
                 deduped = [r for r in deduped if r.match_percentage >= min_pct]
@@ -324,6 +326,41 @@ class MatchProfilesUseCase:
                 rrf_time,
                 gemini_time,
             )
+
+            if not top_matches:
+                # Empty result with an explanation — a blank list tells the
+                # BD user nothing. Name the closest candidate so they know the
+                # KB WAS searched and WHY nothing qualified (e.g. "JD needs
+                # .NET; KB has no .NET profiles").
+                if pre_filter_pool:
+                    best = pre_filter_pool[0]
+                    if min_pct > 0:
+                        hint = (
+                            f"No candidates met the minimum match threshold ({min_pct}%). "
+                            f"Closest match: {best.candidate_name} at "
+                            f"{best.match_percentage}% (variant '{best.variant_title}'). "
+                            "The knowledge base may not contain candidates with this "
+                            "JD's core stack — consider ingesting more profiles."
+                        )
+                    else:
+                        hint = (
+                            "Gemini returned no candidate results for this JD. "
+                            "The knowledge base may not contain relevant profiles."
+                        )
+                    logger.info(
+                        "[STEP 10] Empty result — closest candidate was %s at %d%%",
+                        best.candidate_name, best.match_percentage,
+                    )
+                else:
+                    hint = (
+                        "No candidate variants were found in the knowledge base "
+                        "for this job description. Ingest candidate profiles first."
+                    )
+                return ProfileMatchResponseDTO(
+                    status="SUCCESS",
+                    matches=[],
+                    error_message=hint,
+                )
 
             return ProfileMatchResponseDTO.success(top_matches)
 
@@ -370,7 +407,9 @@ class MatchProfilesUseCase:
         try:
             # Step 1: Fetch the variant payload directly from Qdrant
             logger.info("[STEP 1] Fetching variant from Qdrant | variant_id=%s", variant_id)
-            payload = await self._vector_store_port.fetch_profile_variant_by_id(variant_id)
+            payload = await self._vector_store_port.fetch_profile_variant_by_id(
+                variant_id, user_id=dto.user_id or None,
+            )
 
             if payload is None:
                 logger.warning("[STEP 1] variant_id=%s not found in Qdrant", variant_id)
