@@ -163,6 +163,57 @@ class RequestContextFilter(logging.Filter):
         return True
 
 
+_SHARED_HANDLERS: list[logging.Handler] | None = None
+
+
+def _get_shared_handlers() -> list[logging.Handler]:
+    """Build the console + rotating-file handlers EXACTLY ONCE.
+
+    Every module calls get_logger(__name__) — creating a fresh handler set
+    per logger means 45+ open handles on rag_pipeline.log, and on Windows the
+    first 10MB rotation dies with WinError 32 (file locked by the other
+    handlers). Sharing one handler instance across all loggers fixes
+    rotation and halves console I/O.
+    """
+    global _SHARED_HANDLERS
+    if _SHARED_HANDLERS is not None:
+        return _SHARED_HANDLERS
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.DEBUG)
+
+    # Rotating: 10 MB x 5 backups — prevents unbounded disk growth.
+    from logging.handlers import RotatingFileHandler
+
+    file_handler = RotatingFileHandler(
+        "rag_pipeline.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.DEBUG)
+
+    formatter = logging.Formatter(
+        fmt=(
+            "%(asctime)s | %(levelname)-8s | %(name)s | "
+            "user_id=%(user_id)s | action=%(action)s | section=%(section)s | "
+            "%(message)s"
+        ),
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    console_handler.setFormatter(formatter)
+    file_handler.setFormatter(formatter)
+
+    context_filter = RequestContextFilter()
+    scrubber = CredentialScrubberFilter()
+    for handler in (console_handler, file_handler):
+        handler.addFilter(context_filter)
+        handler.addFilter(scrubber)
+
+    _SHARED_HANDLERS = [console_handler, file_handler]
+    return _SHARED_HANDLERS
+
+
 def get_logger(name: str) -> logging.Logger:
     """
     Returns a configured logger for the given module name.
@@ -181,65 +232,10 @@ def get_logger(name: str) -> logging.Logger:
     # Prevent messages from being handled again by the root logger.
     logger.propagate = False
 
-    # -------------------------------------------------------------------------
-    # Console Handler
-    # -------------------------------------------------------------------------
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.DEBUG)
-
-    # -------------------------------------------------------------------------
-    # File Handler (rotating: 10 MB x 5 backups — prevents unbounded disk growth)
-    # -------------------------------------------------------------------------
-    from logging.handlers import RotatingFileHandler
-
-    file_handler = RotatingFileHandler(
-        "rag_pipeline.log",
-        maxBytes=10 * 1024 * 1024,
-        backupCount=5,
-        encoding="utf-8",
-    )
-    file_handler.setLevel(logging.DEBUG)
-
-    # -------------------------------------------------------------------------
-    # Formatter
-    # -------------------------------------------------------------------------
-    #
-    # Every log line now has:
-    #
-    # timestamp
-    # level
-    # module
-    # user_id
-    # action
-    # message
-    #
-    formatter = logging.Formatter(
-        fmt=(
-            "%(asctime)s | "
-            "%(levelname)-8s | "
-            "%(name)s | "
-            "user_id=%(user_id)s | "
-            "action=%(action)s | "
-            "section=%(section)s | "
-            "%(message)s"
-        ),
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    console_handler.setFormatter(formatter)
-    file_handler.setFormatter(formatter)
-
-    # -------------------------------------------------------------------------
-    # Request Context Filter
-    # -------------------------------------------------------------------------
-    context_filter = RequestContextFilter()
-    scrubber = CredentialScrubberFilter()
-
-    for handler in (console_handler, file_handler):
-        handler.addFilter(context_filter)
-        handler.addFilter(scrubber)
-
-    logger.addHandler(console_handler)
-    logger.addHandler(file_handler)
+    # Shared handlers (see _get_shared_handlers) — one file handle, one
+    # console stream for the entire process. Context + scrubber filters live
+    # on the shared handlers.
+    for handler in _get_shared_handlers():
+        logger.addHandler(handler)
 
     return logger

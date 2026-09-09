@@ -54,7 +54,7 @@ class IngestProjectUseCase:
             # Run in a thread so the event loop keeps serving other requests.
             logger.info("[STEP 1] Starting case study text extraction")
             extract_start = time.perf_counter()
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             # copy_context so logs inside the worker thread still carry the
             # request's user_id/action (threads don't inherit ContextVars).
             ctx = contextvars.copy_context()
@@ -136,7 +136,9 @@ class IngestProjectUseCase:
 
             try:
                 logger.info(f"[STEP 7.1] Deleting any existing data for project '{project.project_id}'")
-                await self._vector_store_port.delete_project(project.project_id)
+                await self._vector_store_port.delete_project(
+                    project.project_id, user_id=getattr(dto, "user_id", None) or None,
+                )
 
                 # From this point on the project exists nowhere — retry each
                 # write once before giving up so a transient Qdrant blip

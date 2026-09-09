@@ -6,6 +6,9 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        # Ignore unknown .env keys instead of crashing startup — a new key
+        # (e.g. for a script) must never take the whole API server down.
+        extra="ignore",
     )
 
     # Application
@@ -18,6 +21,9 @@ class Settings(BaseSettings):
     # MongoDB
     mongodb_uri: str = "mongodb://localhost:27017"
     mongodb_db_name: str = "job_scraper_db"
+
+    # PostgreSQL (used by scripts/sync_postgres_to_qdrant.py)
+    postgres_url: str = ""
 
     # Gemini AI
     gemini_api_key: str = ""

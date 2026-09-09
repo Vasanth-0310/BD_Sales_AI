@@ -50,6 +50,10 @@ class DocumentExtractor:
                 text = DocumentExtractor._extract_docx(file_bytes)
             elif extension == ".pdf":
                 text = DocumentExtractor._extract_pdf(file_bytes)
+            elif extension == ".txt":
+                # Plain-text passthrough — used by scripts/sync_postgres_to_qdrant.py
+                # which feeds in-memory DB text under a "<name>.txt" filename.
+                text = file_bytes.decode("utf-8", errors="replace")
             else:
                 raise DocumentExtractionError(
                     reason=f"Unsupported file extension: '{extension}'"
@@ -87,8 +91,19 @@ class DocumentExtractor:
         from docx import Document  # type: ignore[import-untyped]
 
         document = Document(io.BytesIO(file_bytes))
-        paragraphs = [paragraph.text for paragraph in document.paragraphs]
-        return "\n".join(paragraphs)
+        parts = [paragraph.text for paragraph in document.paragraphs]
+
+        # document.paragraphs only covers body paragraphs — ALL table content
+        # (tech matrices, metrics, architecture tables) would be silently lost.
+        # Iterate every table cell in document order.
+        for table in document.tables:
+            for row in table.rows:
+                row_cells = [cell.text.strip() for cell in row.cells]
+                row_text = " | ".join(cell for cell in row_cells if cell)
+                if row_text:
+                    parts.append(row_text)
+
+        return "\n".join(parts)
 
     @staticmethod
     def _extract_pdf(file_bytes: bytes) -> str:

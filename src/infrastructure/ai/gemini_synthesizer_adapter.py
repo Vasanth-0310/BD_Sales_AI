@@ -8,6 +8,7 @@ parsed and validated into :class:`ProjectMatchResult` value objects.
 
 import asyncio
 import json
+import re
 import time
 from collections import defaultdict
 
@@ -404,7 +405,10 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
             _ct = getattr(_usage, "candidates_token_count", 0) or 0
             logger.info("[Synthesizer] [synthesize_projects] Tokens: prompt=%d completion=%d total=%d", _pt, _ct, _pt + _ct)
             if self._metrics:
-                await self._metrics.increment(self._model, _pt, _ct, "synthesize_projects")
+                try:
+                    await self._metrics.increment(self._model, _pt, _ct, "synthesize_projects")
+                except Exception as metrics_err:
+                    logger.warning("Metrics persist failed (non-fatal): %s", metrics_err)
 
             raw_text = response.text
             logger.debug(f"Gemini Project Match Raw Output JSON:\n{raw_text}")
@@ -543,7 +547,10 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
             _ct = getattr(_usage, "candidates_token_count", 0) or 0
             logger.info("[Synthesizer] [generate_sales_enablement] Tokens: prompt=%d completion=%d total=%d", _pt, _ct, _pt + _ct)
             if self._metrics:
-                await self._metrics.increment(self._model, _pt, _ct, "generate_sales_enablement")
+                try:
+                    await self._metrics.increment(self._model, _pt, _ct, "generate_sales_enablement")
+                except Exception as metrics_err:
+                    logger.warning("Metrics persist failed (non-fatal): %s", metrics_err)
 
             raw_result: dict = json.loads(response.text)
 
@@ -578,14 +585,28 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
                         "enablement output — redacting.",
                         name,
                     )
+                    # Case-INSENSITIVE redaction: detection ignores case, so
+                    # replacement must too — a case-sensitive replace() on
+                    # "acmeportal" vs "AcmePortal" redacts 0 characters and
+                    # leaks the internal name to the client.
+                    pattern = re.compile(re.escape(name), flags=re.IGNORECASE)
                     result = result.model_copy(update={
-                        field: value.replace(name, "our recent work")
+                        field: pattern.sub("our recent work", value)
                         for field, value in (
                             ("outreach_template", result.outreach_template),
                             ("outreach_subject", result.outreach_subject),
                         )
                     } | {
-                        "talking_points": [tp.replace(name, "our recent work") for tp in result.talking_points],
+                        "talking_points": [
+                            pattern.sub("our recent work", tp)
+                            for tp in result.talking_points
+                        ],
+                        # Discovery questions quote client context too — they
+                        # leak internal names just as easily as the email does.
+                        "discovery_questions": [
+                            pattern.sub("our recent work", q)
+                            for q in result.discovery_questions
+                        ],
                     })
 
             elapsed = time.perf_counter() - start
@@ -762,7 +783,10 @@ justification instead).
             _ct = getattr(_usage, "candidates_token_count", 0) or 0
             logger.info("[Synthesizer] [synthesize_profile_matches] Tokens: prompt=%d completion=%d total=%d", _pt, _ct, _pt + _ct)
             if self._metrics:
-                await self._metrics.increment(self._model, _pt, _ct, "synthesize_profile_matches")
+                try:
+                    await self._metrics.increment(self._model, _pt, _ct, "synthesize_profile_matches")
+                except Exception as metrics_err:
+                    logger.warning("Metrics persist failed (non-fatal): %s", metrics_err)
 
             raw_text = response.text
             logger.debug(f"Gemini Profile Match Raw Output JSON:\n{raw_text}")
@@ -956,7 +980,10 @@ Rules:
             _ct = getattr(_usage, "candidates_token_count", 0) or 0
             logger.info("[Synthesizer] [generate_technical_prep] Tokens: prompt=%d completion=%d total=%d", _pt, _ct, _pt + _ct)
             if self._metrics:
-                await self._metrics.increment(self._model, _pt, _ct, "generate_technical_prep")
+                try:
+                    await self._metrics.increment(self._model, _pt, _ct, "generate_technical_prep")
+                except Exception as metrics_err:
+                    logger.warning("Metrics persist failed (non-fatal): %s", metrics_err)
 
             raw_text = response.text
             logger.debug("Gemini Tech Prep Raw Output:\n%s", raw_text)

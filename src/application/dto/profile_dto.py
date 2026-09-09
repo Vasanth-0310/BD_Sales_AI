@@ -39,6 +39,11 @@ class IngestProfileDTO:
     dob: str
     branch: str
     user_id: str = ""                        # Tenant ownership stored in Qdrant payload
+    # Re-ingest reconciliation DELETES variants of this candidate that are not
+    # in the current payload. The differential sync passes PARTIAL payloads
+    # (only missing variants) — reconciliation there would destroy the
+    # candidate's existing Qdrant variants. Sync must pass False.
+    reconcile_variants: bool = True
     variants: list[VariantDTO] = field(default_factory=list)
 
 

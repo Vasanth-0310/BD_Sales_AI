@@ -74,13 +74,16 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         try:
             payload = {
                 "project_id": project.project_id,
-                "user_id": project.user_id,
                 "project_name": project.name,
                 "domain": project.domain,
                 "techstacks": project.techstacks,
                 "description": project.description,
                 "links": project.links,
             }
+            # Omit when unowned: a stored user_id=null is NOT matched by the
+            # tenant filter's is_empty clause in all Qdrant versions.
+            if project.user_id:
+                payload["user_id"] = project.user_id
 
             await self._client.upsert(
                 collection_name=self._summary_collection,
@@ -133,7 +136,6 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
                 payload = {
                     "chunk_id": chunk.chunk_id,
                     "project_id": chunk.project_id,
-                    "user_id": chunk.user_id,
                     "project_name": chunk.project_name,
                     "domain": chunk.domain,
                     "techstacks": chunk.techstacks,
@@ -141,6 +143,9 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
                     "token_count": chunk.token_count,
                     "sequence_index": chunk.sequence_index,
                 }
+                # Omit when unowned (same is_empty/null caveat as summaries).
+                if chunk.user_id:
+                    payload["user_id"] = chunk.user_id
                 points.append(
                     PointStruct(
                         id=chunk.chunk_id,
@@ -325,18 +330,24 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         query_vector: list[float],
         project_ids: list[str],
         top_k: int = 10,
+        user_id: str | None = None,
     ) -> list[dict]:
         """Dense search on chunks, filtered to specific project IDs."""
         start = time.perf_counter()
         try:
-            query_filter = Filter(
-                must=[
-                    FieldCondition(
-                        key="project_id",
-                        match=MatchAny(any=project_ids),
-                    )
-                ]
-            )
+            must_base = [
+                FieldCondition(
+                    key="project_id",
+                    match=MatchAny(any=project_ids),
+                )
+            ]
+            # Stage-1 already scopes project_ids per-tenant, but enforcing the
+            # boundary here too keeps chunk content isolated even if a stale
+            # or cross-tenant project_id sneaks into the Stage-1 output.
+            tenant = self._tenant_filter(user_id)
+            if tenant is not None:
+                must_base.append(tenant)
+            query_filter = Filter(must=must_base)
 
             results = await self._client.query_points(
                 collection_name=self._chunks_collection,
@@ -379,7 +390,13 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         reraise=True,
     )
     async def delete_project(self, project_id: str, user_id: str | None = None) -> None:
-        """Delete all data for a project from both collections."""
+        """Delete all data for a project from both collections.
+
+        Chunks are deleted FIRST: an interrupted ingest can leave chunks with
+        no summary point — deleting the summary first would still work here
+        (both are filter-based), but chunks-first guarantees a summary-only
+        failure can never orphan the (typically larger) chunk set.
+        """
         start = time.perf_counter()
         try:
             # Tenant guard: AND the owner filter onto the project_id condition
@@ -394,17 +411,17 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
             if tenant is not None:
                 must_base.append(tenant)
 
-            # Delete from summary collection (filter by project_id payload)
+            # Delete from chunks collection (filter by project_id payload)
             await self._client.delete(
-                collection_name=self._summary_collection,
+                collection_name=self._chunks_collection,
                 points_selector=models.FilterSelector(
                     filter=Filter(must=must_base)
                 ),
             )
 
-            # Delete from chunks collection (filter by project_id payload)
+            # Delete from summary collection (filter by project_id payload)
             await self._client.delete(
-                collection_name=self._chunks_collection,
+                collection_name=self._summary_collection,
                 points_selector=models.FilterSelector(
                     filter=Filter(must=must_base)
                 ),
@@ -713,7 +730,12 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
     async def check_project_exists(
         self, project_id: str, user_id: str | None = None,
     ) -> bool:
-        """Check whether a project exists in the Summary collection by payload project_id."""
+        """Check whether a project exists in Summary OR Chunks by project_id.
+
+        An ingest interrupted between chunk-write and summary-write leaves
+        chunks with no summary point — checking only the Summary collection
+        would make such projects undeletable (404) with orphaned vectors.
+        """
         start = time.perf_counter()
         try:
             must_base = [
@@ -725,6 +747,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
             tenant = self._tenant_filter(user_id)
             if tenant is not None:
                 must_base.append(tenant)
+
             results, _ = await self._client.scroll(
                 collection_name=self._summary_collection,
                 scroll_filter=Filter(must=must_base),
@@ -732,7 +755,23 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
                 with_payload=False,
                 with_vectors=False,
             )
-            exists = len(results) > 0
+            if results:
+                exists = True
+            else:
+                chunk_results, _ = await self._client.scroll(
+                    collection_name=self._chunks_collection,
+                    scroll_filter=Filter(must=must_base),
+                    limit=1,
+                    with_payload=False,
+                    with_vectors=False,
+                )
+                exists = len(chunk_results) > 0
+                if exists:
+                    logger.warning(
+                        "check_project_exists  |  project_id=%s has CHUNKS but no "
+                        "summary point (interrupted ingest) — treating as existing.",
+                        project_id,
+                    )
             logger.info(
                 "check_project_exists  |  project_id=%s  exists=%s",
                 project_id, exists,
@@ -841,4 +880,197 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
             logger.error("delete_profiles_by_candidate_id failed: %s", exc)
             raise VectorStoreError(
                 reason=f"delete_profiles_by_candidate_id failed for {candidate_id}. Details logged."
+            ) from exc
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=True,
+    )
+    async def delete_profile_variant_by_id(
+        self,
+        variant_id: str,
+        candidate_id: str,
+        user_id: str | None = None,
+    ) -> bool:
+        """Delete a single profile variant by its variant_id (point ID).
+
+        Cross-checks candidate_id and tenant ownership before deletion.
+        Returns True if the variant was found and deleted, False if not found.
+        """
+        start = time.perf_counter()
+        try:
+            # Retrieve the point by its ID to verify ownership
+            points = await self._client.retrieve(
+                collection_name=self._profile_collection,
+                ids=[variant_id],
+                with_payload=["candidate_id", "user_id"],
+                with_vectors=False,
+            )
+
+            if not points:
+                logger.warning(
+                    "delete_profile_variant_by_id: variant_id=%s not found",
+                    variant_id,
+                )
+                return False
+
+            point = points[0]
+            payload = point.payload or {}
+
+            # Cross-check: variant must belong to the specified candidate
+            stored_candidate = payload.get("candidate_id", "")
+            if stored_candidate != candidate_id:
+                logger.warning(
+                    "delete_profile_variant_by_id: variant_id=%s belongs to "
+                    "candidate '%s', not '%s' — access denied",
+                    variant_id, stored_candidate, candidate_id,
+                )
+                return False
+
+            # Tenant check: if user_id is provided, the point must match
+            if user_id:
+                stored_user = payload.get("user_id")
+                if stored_user and stored_user != user_id:
+                    logger.warning(
+                        "delete_profile_variant_by_id: variant_id=%s belongs to "
+                        "tenant '%s', not '%s' — access denied",
+                        variant_id, stored_user, user_id,
+                    )
+                    return False
+
+            # Safe to delete — remove the single point
+            await self._client.delete(
+                collection_name=self._profile_collection,
+                points_selector=models.PointIdsList(points=[variant_id]),
+            )
+
+            elapsed = time.perf_counter() - start
+            logger.info(
+                "delete_profile_variant_by_id completed in %.3fs  |  "
+                "variant_id=%s  candidate_id=%s",
+                elapsed, variant_id, candidate_id,
+            )
+            return True
+
+        except Exception as exc:
+            logger.error("delete_profile_variant_by_id failed: %s", exc)
+            raise VectorStoreError(
+                reason=f"delete_profile_variant_by_id failed for {variant_id}. Details logged."
+            ) from exc
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=True,
+    )
+    async def reconcile_profile_variants(
+        self, candidate_id: str, keep_variant_ids: list[str], user_id: str | None = None,
+    ) -> int:
+        """Delete stale variants (candidate re-ingest reconciliation).
+
+        Called after a successful re-ingest: removes points whose variant_id
+        is NOT in keep_variant_ids, so removed/renamed variants don't linger
+        in the vector DB matching queries forever.
+        """
+        start = time.perf_counter()
+        try:
+            keep = set(keep_variant_ids)
+            must_base = [
+                FieldCondition(
+                    key="candidate_id",
+                    match=MatchValue(value=candidate_id),
+                )
+            ]
+            tenant = self._tenant_filter(user_id)
+            if tenant is not None:
+                must_base.append(tenant)
+
+            stale_ids: list[str] = []
+            offset = None
+            while True:
+                points, next_offset = await self._client.scroll(
+                    collection_name=self._profile_collection,
+                    scroll_filter=Filter(must=must_base),
+                    limit=100,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in points:
+                    vid = (point.payload or {}).get("variant_id")
+                    if vid and vid not in keep:
+                        stale_ids.append(str(point.id))
+                if next_offset is None:
+                    break
+                offset = next_offset
+
+            if not stale_ids:
+                return 0
+
+            await self._client.delete(
+                collection_name=self._profile_collection,
+                points_selector=models.PointIdsList(points=stale_ids),
+            )
+
+            elapsed = time.perf_counter() - start
+            logger.info(
+                "reconcile_profile_variants completed in %.3fs  |  candidate_id=%s  removed=%d",
+                elapsed, candidate_id, len(stale_ids),
+            )
+            return len(stale_ids)
+        except Exception as exc:
+            logger.error("reconcile_profile_variants failed: %s", exc)
+            raise VectorStoreError(
+                reason=f"reconcile_profile_variants failed for {candidate_id}. Details logged."
+            ) from exc
+
+    # ─── Sync Support Methods ────────────────────────────────────────────
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=True,
+    )
+    async def scroll_all_point_ids(self, collection_name: str) -> set[str]:
+        """Scroll through an entire collection and return all point IDs.
+
+        Lightweight — does NOT transfer vectors or payloads over the network.
+        Uses the same pagination pattern as delete_profiles_by_candidate_id.
+
+        Args:
+            collection_name: Name of the Qdrant collection to scroll.
+
+        Returns:
+            A set of all point IDs (strings) in the collection.
+        """
+        start = time.perf_counter()
+        try:
+            all_ids: set[str] = set()
+            offset = None
+            while True:
+                batch, next_offset = await self._client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=None,
+                    limit=250,
+                    offset=offset,
+                    with_payload=False,
+                    with_vectors=False,
+                )
+                for point in batch:
+                    all_ids.add(str(point.id))
+                if next_offset is None:
+                    break
+                offset = next_offset
+
+            elapsed = time.perf_counter() - start
+            logger.info(
+                "scroll_all_point_ids completed in %.3fs  |  collection=%s  count=%d",
+                elapsed, collection_name, len(all_ids),
+            )
+            return all_ids
+        except Exception as exc:
+            logger.error("scroll_all_point_ids failed for collection %s: %s", collection_name, exc)
+            raise VectorStoreError(
+                reason=f"scroll_all_point_ids failed for {collection_name}. Details logged."
             ) from exc

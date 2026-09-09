@@ -181,16 +181,31 @@ class _NodriverPool:
         browser = self._browsers.pop(profile_dir, None)
         if browser is None:
             return
+        # nodriver's Connection.aclose() only closes the client WebSocket —
+        # it does NOT send Browser.close and does not terminate the
+        # subprocess (the adapter's own close() needs a PID taskkill backstop
+        # for the same reason). Without the backstop every discard leaks a
+        # chrome.exe that holds the profile directory lock.
+        pid = getattr(getattr(browser, "_process", None), "pid", None)
         try:
-            await browser.aclose()  # proper async variant of stop()
+            await browser.aclose()
         except Exception:
             try:
                 browser.stop()
             except Exception as e:
-                logger.warning(
-                    f"NodriverPool: discard of {profile_dir} failed ({e}) — "
-                    f"PID backstop: {getattr(browser._process, 'pid', '?')}."
+                logger.warning(f"NodriverPool: discard stop failed for {profile_dir}: {e}")
+        if pid:
+            import asyncio as _asyncio
+
+            def _taskkill() -> None:
+                import subprocess
+
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True, timeout=5,
                 )
+
+            await _asyncio.to_thread(_taskkill)
         logger.info(f"NodriverPool: discarded broken warm Chrome for {profile_dir}.")
 
     def notify_tab_closed(self, profile_dir: str | None) -> None:

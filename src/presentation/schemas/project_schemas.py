@@ -1,5 +1,5 @@
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, AliasChoices, ConfigDict
 
 
 class ProjectDataSchema(BaseModel):
@@ -59,8 +59,16 @@ class ProjectContextSchema(BaseModel):
     """A single project's context sent by the frontend for sales enablement generation."""
     project_name: str = Field(..., description="The project name (used as context only, not quoted in output)")
     domain: str = Field(..., description="The industry domain of the project")
-    tech_stack: list[str] = Field(..., description="Technologies used in the project")
+    # Accept BOTH spellings: the ingest/match flow uses `techstacks` while the
+    # UI sends `tech_stack` — a rigid single name 422s perfectly valid payloads.
+    tech_stack: list[str] = Field(
+        ...,
+        validation_alias=AliasChoices("tech_stack", "techstacks"),
+        description="Technologies used in the project",
+    )
     description: str = Field(..., description="Brief description of what the project does")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class SalesEnablementPayloadSchema(BaseModel):

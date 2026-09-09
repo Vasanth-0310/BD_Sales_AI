@@ -43,14 +43,14 @@ from src.common.logger import get_logger  # noqa: E402
 logger = get_logger("provision_qdrant")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PASTE YOUR PROD CREDENTIALS HERE
+# CREDENTIALS — DO NOT paste secrets into this file.
+# The script reads QDRANT_URL / QDRANT_API_KEY from your .env (via settings),
+# or accepts --url / --api-key CLI args for one-off overrides. Hardcoded
+# credentials here previously SILENTLY OVERRIDED .env — a footgun that could
+# point --recreate at production. If a key was ever committed here, ROTATE it.
 # ══════════════════════════════════════════════════════════════════════════════
-PROD_QDRANT_URL = "https://dac00d78-d18f-47c6-8765-2d7b524f974a.sa-east-1-0.aws.cloud.qdrant.io"      
-PROD_QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIiwic3ViamVjdCI6ImFwaS1rZXk6ODk2YjQ2ZjMtYzBjMS00ZGExLTg4ZDEtM2YwYjczZWIxYjkwIn0.LNKme9-_WcqfBXIYCyTFoVijgclEF3Q5-hA2-oa_4vw"  
-# ══════════════════════════════════════════════════════════════════════════════
-# Just paste the two values above, save, then run:
-#     python scripts/provision_qdrant.py
-# If left empty, the script falls back to --url/--api-key args or your .env.
+PROD_QDRANT_URL = ""      # deprecated — leave empty; use .env or --url
+PROD_QDRANT_API_KEY = ""  # deprecated — leave empty; use .env or --api-key
 
 VECTOR_SIZE = settings.qdrant_vector_size  # 1536 — gemini-embedding-001 output dim
 DISTANCE = models.Distance.COSINE
@@ -60,15 +60,15 @@ def provision(client: QdrantClient, recreate: bool) -> None:
     collections_spec = {
         settings.qdrant_summary_collection: {
             "text": ["description", "project_name", "domain", "techstacks"],
-            "keyword": ["project_id"],
+            "keyword": ["project_id", "user_id"],
         },
         settings.qdrant_chunks_collection: {
             "text": [],
-            "keyword": ["project_id"],
+            "keyword": ["project_id", "user_id"],
         },
         settings.qdrant_profile_variants_collection: {
             "text": ["combined_text", "variant_title", "tech_stacks_text"],
-            "keyword": ["candidate_id"],
+            "keyword": ["candidate_id", "user_id"],
         },
     }
 

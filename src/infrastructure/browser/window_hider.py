@@ -79,8 +79,11 @@ def show_windows_of_pids(pids: set[int]) -> int:
         return 0
     shown = 0
     for hwnd in _windows_of_pids(pids, visible_only=False):
-        if _user32.ShowWindow(hwnd, SW_SHOW):
-            shown += 1
+        # ShowWindow returns 0 when the window was ALREADY hidden before the
+        # call (MSDN: "If the window was previously visible, the return value
+        # is nonzero") — 0 does NOT mean the show failed. Count the call.
+        _user32.ShowWindow(hwnd, SW_SHOW)
+        shown += 1
     return shown
 
 

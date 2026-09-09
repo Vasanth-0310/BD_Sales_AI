@@ -81,7 +81,10 @@ class IVectorStorePort(ABC):
         ...
 
     @abstractmethod
-    async def search_chunks_dense(self, query_vector: list[float], project_ids: list[str], top_k: int = 10) -> list[dict]:
+    async def search_chunks_dense(
+        self, query_vector: list[float], project_ids: list[str], top_k: int = 10,
+        user_id: str | None = None,
+    ) -> list[dict]:
         """
         Dense search on the chunks collection, filtered to specific project IDs.
 
@@ -264,5 +267,54 @@ class IVectorStorePort(ABC):
 
         Raises:
             VectorStoreError: If the delete operation fails.
+        """
+        ...
+
+    @abstractmethod
+    async def delete_profile_variant_by_id(
+        self,
+        variant_id: str,
+        candidate_id: str,
+        user_id: str | None = None,
+    ) -> bool:
+        """
+        Delete a single profile variant by its variant_id (Qdrant point ID).
+
+        Cross-checks that the variant belongs to the given candidate_id and
+        user_id (tenant scoping) before deletion.
+
+        Args:
+            variant_id: The UUID string variant ID (Qdrant point ID).
+            candidate_id: The UUID string candidate ID for ownership check.
+            user_id: Optional tenant user ID for multi-tenant scoping.
+
+        Returns:
+            True if the variant was found and deleted.
+
+        Raises:
+            VectorStoreError: If the delete operation fails.
+        """
+        ...
+
+    @abstractmethod
+    async def reconcile_profile_variants(
+        self, candidate_id: str, keep_variant_ids: list[str], user_id: str | None = None,
+    ) -> int:
+        """
+        Delete profile variants for a candidate that are NOT in
+        ``keep_variant_ids`` — the re-ingest reconciliation step that removes
+        zombie variants left behind when a candidate removes or renames
+        variants in the source system.
+
+        Args:
+            candidate_id: The candidate whose stale variants should be purged.
+            keep_variant_ids: Variant IDs present in the fresh ingest.
+            user_id: Optional tenant scoping.
+
+        Returns:
+            The number of stale variants deleted.
+
+        Raises:
+            VectorStoreError: If the reconciliation fails.
         """
         ...

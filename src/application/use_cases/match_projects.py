@@ -147,11 +147,19 @@ class MatchProjectsUseCase:
             # ── Step 4: Stage 2 — Dense search on chunks ─────────────────────
             logger.info(f"[STEP 8] Starting Stage 2 dense chunk retrieval for Top 5 projects")
             stage2_start = time.perf_counter()
-            # Fetch deeper than needed (15) so the per-project evidence balancer
-            # in Step 9 still has material when one project dominates the ranking.
-            chunk_results = await self._vector_store_port.search_chunks_dense(
-                query_vector, project_ids=top5_project_ids, top_k=15
-            )
+            # Per-project queries (top_k=3 each) instead of one global top-15:
+            # a single dominant project's chunks would otherwise consume the
+            # global limit and starve the other 4 candidates of any evidence.
+            per_project = await asyncio.gather(*(
+                self._vector_store_port.search_chunks_dense(
+                    query_vector, project_ids=[pid], top_k=3,
+                    user_id=dto.user_id or None,
+                )
+                for pid in top5_project_ids
+            ))
+            chunk_results: list[dict] = []
+            for chunks in per_project:
+                chunk_results.extend(chunks)
             stage2_time = time.perf_counter() - stage2_start
             logger.info(f"[STEP 8] Stage 2 chunk retrieval completed in {stage2_time:.2f}s")
             logger.info(f"[STEP 8] Retrieved a total of {len(chunk_results)} evidence chunks")

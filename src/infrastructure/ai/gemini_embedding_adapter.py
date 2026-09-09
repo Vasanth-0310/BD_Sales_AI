@@ -20,6 +20,11 @@ from src.domain.interfaces.rag.i_embedding_port import IEmbeddingPort
 
 logger = get_logger(__name__)
 
+# Hard char cap per embedded text (~2,000 tokens for gemini-embedding-001,
+# whose hard limit is 2,048 input tokens). Oversized texts otherwise fail
+# the entire embed call.
+_MAX_EMBED_CHARS = 8000
+
 
 class GeminiEmbeddingAdapter(IEmbeddingPort):
     """Concrete :class:`IEmbeddingPort` backed by the Gemini Embedding API.
@@ -63,7 +68,7 @@ class GeminiEmbeddingAdapter(IEmbeddingPort):
             logger.debug(f"Embedding Document Text: {text[:200]}...")
             response = await self._client.aio.models.embed_content(
                 model=self._model,
-                contents=text,
+                contents=text[:_MAX_EMBED_CHARS],
                 config=types.EmbedContentConfig(
                     task_type="RETRIEVAL_DOCUMENT",
                     output_dimensionality=settings.qdrant_vector_size,
@@ -111,7 +116,7 @@ class GeminiEmbeddingAdapter(IEmbeddingPort):
             logger.debug(f"Embedding Query Text: {text[:200]}...")
             response = await self._client.aio.models.embed_content(
                 model=self._model,
-                contents=text,
+                contents=text[:_MAX_EMBED_CHARS],
                 config=types.EmbedContentConfig(
                     task_type="RETRIEVAL_QUERY",
                     output_dimensionality=settings.qdrant_vector_size,
@@ -150,7 +155,7 @@ class GeminiEmbeddingAdapter(IEmbeddingPort):
         the 62s free-tier pauses for them."""
         return await self._client.aio.models.embed_content(
             model=self._model,
-            contents=batch,
+            contents=[t[:_MAX_EMBED_CHARS] for t in batch],
             config=types.EmbedContentConfig(
                 task_type="RETRIEVAL_DOCUMENT",
                 output_dimensionality=settings.qdrant_vector_size,

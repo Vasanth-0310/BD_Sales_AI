@@ -1,5 +1,6 @@
 """Use case: Generate Technical Preparation guides for multiple candidates."""
 
+import asyncio
 import time
 
 from src.domain.interfaces.rag.i_vector_store_port import IVectorStorePort
@@ -61,65 +62,77 @@ class GenerateBatchTechnicalPrepUseCase:
         if not dto.candidates:
             return BatchTechnicalPrepResponseDTO.failed("candidates list must not be empty.")
 
-        # ── Step 2: Sequential loop — delegate to single use case ───────
-        results: list[CandidatePrepResult] = []
+        # ── Step 2: Bounded-parallel loop — delegate to single use case ──
+        # Strict sequencing made a 10-candidate batch take 100-300s+ and trip
+        # reverse-proxy (NGINX/ALB/Cloudflare) gateway timeouts. A semaphore
+        # of 3 keeps Gemini free-tier 429 storms bounded while cutting total
+        # wall time ~3x. Results are re-ordered to input order below.
+        results: list[CandidatePrepResult | None] = [None] * len(dto.candidates)
+        semaphore = asyncio.Semaphore(3)
+        total = len(dto.candidates)
 
-        for idx, candidate in enumerate(dto.candidates):
-            logger.info(
-                "[CANDIDATE %d/%d] variant_id=%s",
-                idx + 1, len(dto.candidates), candidate.variant_id,
-            )
-            candidate_start = time.perf_counter()
-
-            try:
-                single_dto = TechnicalPrepRequestDTO(
-                    job_details=dto.job_details,
-                    variant_id=candidate.variant_id,
-                    user_id=dto.user_id,
-                    matching_skills=candidate.matching_skills,
-                    missing_skills=candidate.missing_skills,
+        async def _prep_one(idx: int, candidate) -> None:
+            async with semaphore:
+                logger.info(
+                    "[CANDIDATE %d/%d] variant_id=%s",
+                    idx + 1, total, candidate.variant_id,
                 )
-                r = await self._single_prep.execute(single_dto)
-
-                if r.status == "SUCCESS":
-                    results.append(CandidatePrepResult(
+                candidate_start = time.perf_counter()
+                try:
+                    single_dto = TechnicalPrepRequestDTO(
+                        job_details=dto.job_details,
                         variant_id=candidate.variant_id,
-                        status="SUCCESS",
-                        candidate_name=r.candidate_name,
-                        variant_title=r.variant_title,
-                        technical_briefing_note=(
-                            r.result.technical_briefing_note if r.result else None
-                        ),
-                        interview_preparation_guide=(
-                            r.result.interview_preparation_guide if r.result else []
-                        ),
-                    ))
-                else:
-                    results.append(CandidatePrepResult(
+                        user_id=dto.user_id,
+                        matching_skills=candidate.matching_skills,
+                        missing_skills=candidate.missing_skills,
+                    )
+                    r = await self._single_prep.execute(single_dto)
+
+                    if r.status == "SUCCESS":
+                        results[idx] = CandidatePrepResult(
+                            variant_id=candidate.variant_id,
+                            status="SUCCESS",
+                            candidate_name=r.candidate_name,
+                            variant_title=r.variant_title,
+                            technical_briefing_note=(
+                                r.result.technical_briefing_note if r.result else None
+                            ),
+                            interview_preparation_guide=(
+                                r.result.interview_preparation_guide if r.result else []
+                            ),
+                        )
+                    else:
+                        results[idx] = CandidatePrepResult(
+                            variant_id=candidate.variant_id,
+                            status="FAILED",
+                            error_message=r.error_message,
+                        )
+
+                except Exception as e:
+                    logger.error(
+                        "[CANDIDATE %d/%d] Unexpected error: %s",
+                        idx + 1, total, e,
+                        exc_info=True,
+                    )
+                    # No internal details to the client — full error is logged.
+                    results[idx] = CandidatePrepResult(
                         variant_id=candidate.variant_id,
                         status="FAILED",
-                        error_message=r.error_message,
-                    ))
+                        error_message="Internal error: please check server logs.",
+                    )
 
-            except Exception as e:
-                logger.error(
-                    "[CANDIDATE %d/%d] Unexpected error: %s",
-                    idx + 1, len(dto.candidates), e,
-                    exc_info=True,
+                logger.info(
+                    "[CANDIDATE %d/%d] completed in %.2fs | status=%s",
+                    idx + 1, total,
+                    time.perf_counter() - candidate_start,
+                    results[idx].status,
                 )
-                # No internal details to the client — full error is logged.
-                results.append(CandidatePrepResult(
-                    variant_id=candidate.variant_id,
-                    status="FAILED",
-                    error_message="Internal error: please check server logs.",
-                ))
 
-            logger.info(
-                "[CANDIDATE %d/%d] completed in %.2fs | status=%s",
-                idx + 1, len(dto.candidates),
-                time.perf_counter() - candidate_start,
-                results[-1].status,
-            )
+        await asyncio.gather(*(
+            _prep_one(idx, candidate)
+            for idx, candidate in enumerate(dto.candidates)
+        ))
+        results = [r for r in results if r is not None]
 
         # ── Step 3: Post-loop — ALL candidates failed → top-level FAILED ─
         if results and all(r.status == "FAILED" for r in results):

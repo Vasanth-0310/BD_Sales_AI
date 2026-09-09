@@ -16,7 +16,9 @@ Run:  .venv\\Scripts\\python.exe scripts\\create_payload_indexes.py
 """
 
 import sys
-sys.path.insert(0, r"C:\Users\Softsuave\Documents\Demo_works")
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from qdrant_client import QdrantClient, models
 

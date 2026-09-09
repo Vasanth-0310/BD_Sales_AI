@@ -32,11 +32,14 @@ _PAY_PERIOD_KEYWORDS: tuple[tuple[str, str], ...] = (
     ("/year", "Yearly"), ("a year", "Yearly"),
     ("monthly", "Monthly"), ("per month", "Monthly"), ("/month", "Monthly"),
     ("a month", "Monthly"),
+    # MUST precede "weekly" — "biweekly" contains "weekly" as a substring and
+    # the keyword scan below is `kw in low`, so a later weekly entry would
+    # misclassify every biweekly salary as Weekly.
+    ("biweekly", "Biweekly"), ("bi-weekly", "Biweekly"), ("bi weekly", "Biweekly"),
     ("weekly", "Weekly"), ("per week", "Weekly"), ("/week", "Weekly"),
     ("a week", "Weekly"),
     ("daily", "Daily"), ("per day", "Daily"), ("/day", "Daily"),
     ("a day", "Daily"),
-    ("biweekly", "Biweekly"),
     ("fixed-price", "Fixed"), ("fixed price", "Fixed"),
 )
 

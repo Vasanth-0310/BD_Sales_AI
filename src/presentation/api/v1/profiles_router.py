@@ -1,3 +1,4 @@
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from src.application.dto.profile_dto import (
@@ -8,7 +9,7 @@ from src.application.dto.profile_dto import (
 )
 from src.application.use_cases.ingest_profile import IngestProfileUseCase
 from src.application.use_cases.match_profiles import MatchProfilesUseCase
-from src.application.use_cases.delete_profile import DeleteProfileUseCase, CandidateNotFoundException
+from src.application.use_cases.delete_profile import DeleteProfileUseCase, CandidateNotFoundException, VariantNotFoundException
 from src.domain.exceptions.rag_exceptions import VectorStoreError
 from src.infrastructure.ai.cached_embedding_adapter import CachedEmbeddingAdapter
 from src.infrastructure.ai.gemini_synthesizer_adapter import GeminiSynthesizerAdapter
@@ -221,7 +222,7 @@ async def match_profiles(
             ProfileMatchResultSchema(
                 candidate_id=m.candidate_id,
                 candidate_name=m.candidate_name,
-                email=m.email if hasattr(m, "email") else "",
+                email=m.email or "",  # None must not hit the strict str field → 500
                 variant_id=m.variant_id,
                 variant_title=m.variant_title,
                 role=m.role if hasattr(m, "role") else None,
@@ -258,14 +259,19 @@ def get_delete_profile_use_case(
 async def delete_candidate_profiles(
     user_id: str,
     candidate_id: str,
+    variant_id: Optional[str] = None,
     action: str = "delete_profiles",
     use_case: DeleteProfileUseCase = Depends(get_delete_profile_use_case),
 ) -> DeleteProfileResponse:
     """
-    Permanently deletes all profile variants for a given candidate_id
+    Permanently deletes profile variants for a given candidate_id
     from the vector store.
 
-    Returns 404 if the candidate_id does not exist.
+    - If **variant_id** is provided, deletes only that single variant
+      (cross-checked against candidate_id for safety).
+    - If **variant_id** is omitted, deletes ALL variants for the candidate.
+
+    Returns 404 if the candidate_id or variant_id does not exist.
     """
 
     user_token, action_token, section_token = set_log_context(
@@ -275,22 +281,45 @@ async def delete_candidate_profiles(
     )
 
     try:
-        logger.info(
-            "Removing candidate profile '%s' from the knowledge base",
-            candidate_id,
+        if variant_id:
+            logger.info(
+                "Removing single variant '%s' for candidate '%s'",
+                variant_id, candidate_id,
+            )
+        else:
+            logger.info(
+                "Removing all variants for candidate '%s'",
+                candidate_id,
+            )
+
+        count = await use_case.execute(
+            candidate_id=candidate_id,
+            user_id=user_id,
+            variant_id=variant_id,
         )
 
-        count = await use_case.execute(candidate_id, user_id)
+        if variant_id:
+            message = (
+                f"Variant '{variant_id}' for candidate "
+                f"'{candidate_id}' has been deleted."
+            )
+        else:
+            message = (
+                f"All {count} profile variant(s) for candidate "
+                f"'{candidate_id}' have been deleted."
+            )
 
         return DeleteProfileResponse(
             status="SUCCESS",
-            message=(
-                f"All {count} profile variant(s) for candidate "
-                f"'{candidate_id}' have been deleted."
-            ),
+            message=message,
         )
 
     except CandidateNotFoundException as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        )
+    except VariantNotFoundException as exc:
         raise HTTPException(
             status_code=404,
             detail=str(exc),

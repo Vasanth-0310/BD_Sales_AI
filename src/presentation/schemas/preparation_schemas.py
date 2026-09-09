@@ -1,16 +1,22 @@
 ﻿"""Pydantic schemas for the Technical Preparation API endpoints."""
 
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
-# â”€â”€â”€ Request Schemas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â”€â”€â”€ Request Schemas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class CandidateInputSchema(BaseModel):
     """A single candidate's input in a batch tech prep request."""
     variant_id: str = Field(..., description="UUID of the candidate variant from Qdrant.")
     matching_skills: list[str] = Field(default_factory=list)
     missing_skills: list[str] = Field(default_factory=list)
+
+    @field_validator("matching_skills", "missing_skills", mode="before")
+    @classmethod
+    def _coerce_none_to_empty(cls, v):
+        """Frontends sending explicit null must not 422 — treat as empty."""
+        return v if v is not None else []
 
 
 class TechnicalPrepPayloadSchema(BaseModel):

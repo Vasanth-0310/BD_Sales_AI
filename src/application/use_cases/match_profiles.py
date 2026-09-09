@@ -76,7 +76,7 @@ class MatchProfilesUseCase:
             # through to the normal auto-match pipeline.
             if dto.variant_id and self._is_valid_uuid(dto.variant_id.strip()):
                 return await self._execute_manual_match(
-                    job_details, dto.variant_id.strip()
+                    job_details, dto.variant_id.strip(), user_id=dto.user_id or None
                 )
 
             # ── Step 2: Embed JD ─────────────────────────────────────────
@@ -202,15 +202,30 @@ class MatchProfilesUseCase:
             for vid, _score in rrf_results:
                 payload = candidates_map.get(vid, {}).get("payload") or {}
                 cid = payload.get("candidate_id", "")
-                if len(top_variant_ids) < _GEMINI_POOL_SIZE:
-                    if cid and per_candidate_count.get(cid, 0) >= _PER_CANDIDATE_POOL_CAP:
-                        overflow_ids.append(vid)
-                        continue
-                    if cid:
-                        per_candidate_count[cid] = per_candidate_count.get(cid, 0) + 1
-                    top_variant_ids.append(vid)
-                else:
+                if cid and per_candidate_count.get(cid, 0) >= _PER_CANDIDATE_POOL_CAP:
+                    overflow_ids.append(vid)
+                    continue
+                if cid:
+                    per_candidate_count[cid] = per_candidate_count.get(cid, 0) + 1
+                top_variant_ids.append(vid)
+                if len(top_variant_ids) >= _GEMINI_POOL_SIZE:
                     break
+
+            # Pool-diversity top-up: with the per-candidate cap, duplicate-
+            # heavy results can fill fewer than 8 slots (e.g. 4 candidates ×
+            # 2 variants). Top up from the overflow queue — extra variants of
+            # already-pooled candidates are still worth scoring if slots are
+            # otherwise wasted.
+            if len(top_variant_ids) < _GEMINI_POOL_SIZE and overflow_ids:
+                for vid in overflow_ids:
+                    if len(top_variant_ids) >= _GEMINI_POOL_SIZE:
+                        break
+                    top_variant_ids.append(vid)
+                logger.info(
+                    "[STEP 6] Pool topped up from overflow to %d variant(s) "
+                    "(diversity cap left slots unused).",
+                    len(top_variant_ids),
+                )
 
             rrf_time = time.perf_counter() - rrf_start
 
@@ -259,7 +274,11 @@ class MatchProfilesUseCase:
             # ── Enrich results with payload metadata ────────────────────
             # Gemini only returns what we put in the prompt. Metadata is in payload.
             variant_meta_map: dict[str, dict] = {
-                p["variant_id"]: {"email": p.get("email", ""), "role": p.get("role", "")}
+                p["variant_id"]: {
+                    "email": p.get("email", ""),
+                    "role": p.get("role", ""),
+                    "resource_status": p.get("resource_status", ""),
+                }
                 for p in gemini_payloads
                 if isinstance(p, dict) and p.get("variant_id")
             }
@@ -294,8 +313,15 @@ class MatchProfilesUseCase:
             # ── Step 9.5: Re-sort deterministically (mirror match_projects) ──
             # Gemini is asked to return sorted output, but its ordering is not
             # guaranteed — same flaw fixed in match_projects. Python re-sorts
-            # by match_percentage so the top-5 slice is always correct.
-            deduped.sort(key=lambda r: r.match_percentage, reverse=True)
+            # by match_percentage so the top-5 slice is always correct, with
+            # the availability status as an EXACT-percentage tiebreaker
+            # (On Bench wins ties — the same policy as the RRF sort above).
+            def _tiebreak_key(r):
+                meta = variant_meta_map.get(r.variant_id, {})
+                priority = _STATUS_PRIORITY.get(meta.get("resource_status", ""), 5)
+                return (-r.match_percentage, priority)
+
+            deduped.sort(key=_tiebreak_key)
 
             # ── Step 9.6: Minimum-quality threshold ────────────────────
             # Weak matches below this percentage are not meaningful
@@ -388,7 +414,7 @@ class MatchProfilesUseCase:
             return False
 
     async def _execute_manual_match(
-        self, job_details: str, variant_id: str
+        self, job_details: str, variant_id: str, user_id: str = ""
     ) -> ProfileMatchResponseDTO:
         """
         Manual path: skip all retrieval (embed / dense / keyword / BM25 / RRF).
@@ -408,7 +434,7 @@ class MatchProfilesUseCase:
             # Step 1: Fetch the variant payload directly from Qdrant
             logger.info("[STEP 1] Fetching variant from Qdrant | variant_id=%s", variant_id)
             payload = await self._vector_store_port.fetch_profile_variant_by_id(
-                variant_id, user_id=dto.user_id or None,
+                variant_id, user_id=user_id,
             )
 
             if payload is None:

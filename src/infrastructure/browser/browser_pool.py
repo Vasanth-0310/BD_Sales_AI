@@ -152,7 +152,9 @@ class _BrowserPool:
             # lifespan shutdown — pool Chromes (headed but window-hidden via
             # SW_HIDE) survive invisibly and accumulate in Task Manager. Kill
             # any stale marker processes BEFORE launching a fresh browser.
-            self._kill_stale_pool_browsers()
+            # Off-loop: the PowerShell scan can block 1.5-15s and must not
+            # freeze the event loop (it would stall ALL in-flight requests).
+            await asyncio.to_thread(self._kill_stale_pool_browsers)
 
             primary = settings.browser_engine.strip().lower()
             logger.info(f"BrowserPool: Starting persistent Chromium ({primary})...")
@@ -192,7 +194,7 @@ class _BrowserPool:
         for pid in pids:
             try:
                 subprocess.run(
-                    ["taskkill", "/F", "/PID", str(pid)],
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
                     capture_output=True,
                     timeout=5,
                 )
@@ -346,6 +348,13 @@ class _BrowserPool:
                     self._active_tabs -= 1
                 if self._active_tabs == 0:
                     self.hide_window_now()
+            # Detach ALL shared references. A later adapter.close() checks
+            # `if not _pool_managed and self._browser` — with the stale shared
+            # browser still attached it would terminate the ENTIRE pool.
+            adapter._page = None
+            adapter._context = None
+            adapter._browser = None
+            adapter._playwright = None
 
     async def shutdown(self) -> None:
         """Stop the shared browser. Call this on server shutdown."""

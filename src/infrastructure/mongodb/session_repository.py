@@ -96,7 +96,14 @@ class MongoDBSessionRepository(ISessionStore):
 
     async def get_all_active_sessions(self) -> list[UserSession]:
         cursor = self._collection.find({"status": SessionStatus.ACTIVE.value})
-        docs = await cursor.to_list(length=None)
+        # Hard cap: storage states carry multi-KB cookie blobs — an unbounded
+        # to_list() on a large fleet would balloon memory per refresh cycle.
+        docs = await cursor.to_list(length=500)
+        if len(docs) >= 500:
+            logger.warning(
+                "get_all_active_sessions hit the 500-document cap — "
+                "some sessions will not be refreshed this cycle."
+            )
         return [_from_document(doc) for doc in docs]
 
     async def mark_session_expired(self, user_id: str, domain: str) -> None:

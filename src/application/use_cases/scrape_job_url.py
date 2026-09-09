@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 # HTTP statuses where retrying through a real browser may plausibly help
 # (bot-blocking / transient server issues). Any other non-200 is treated as
 # a definitive failure instead of burning a browser launch on it.
-_RETRY_STATUS_CODES = {403, 408, 429, 500, 502, 503, 504}
+_RETRY_STATUS_CODES = {401, 403, 408, 429, 500, 502, 503, 504}
 
 
 def _is_cloudflare_page(html: str) -> bool:
@@ -528,14 +528,16 @@ class ScrapeJobURL:
             return browser
 
         async def _factory_launcher():
+            # skip_orphan_kill=True: the storage_state profile may be owned by a
+            # LIVE NodriverPool warm Chrome — the orphan kill inside launch()
+            # would taskkill it mid-scrape. (Critical: the kill runs during
+            # launch, BEFORE the old post-launch flag assignment could apply.)
             browser = await BrowserFactory.launch_browser(
                 headless=settings.browser_cloak_headless,
                 storage_state=storage_state,
+                skip_orphan_kill=True,
             )
-            # F5: never let a last-resort cold launch taskkill the pool's warm
-            # Chrome (it matches the same profile path).
-            if isinstance(browser, NodriverAdapter):
-                browser._skip_orphan_kill = True
+            browser._skip_orphan_kill = True
             return browser
 
         engines: list[tuple[str, object]] = []
@@ -577,6 +579,11 @@ class ScrapeJobURL:
                     "current_url": current_url,
                     "cleaned_text": cleaned_html,
                 }
+            except asyncio.CancelledError:
+                # Task cancellation (client disconnect, shutdown) must not
+                # leak the acquired tab — release before propagating.
+                await self._close_quietly(browser)
+                raise
             except Exception as nav_err:
                 logger.warning(
                     f"Engine '{engine_name}' navigation failed "
@@ -584,13 +591,17 @@ class ScrapeJobURL:
                 )
                 await self._close_quietly(browser)
                 # Self-heal a dead warm browser: discard it and retry this
-                # engine exactly once with a fresh launch.
+                # engine exactly once with a fresh launch. The retry entry is
+                # named with a "-retry" suffix; retry entries themselves are
+                # never re-queued (a naive startswith check would loop forever
+                # as "-retry-retry", "-retry-retry-retry", ...).
+                base_name = engine_name.removesuffix("-retry")
                 if (
-                    engine_name.startswith("nodriver-profile")
+                    base_name.startswith("nodriver-profile")
                     and "connection closed" in str(nav_err).lower()
-                    and engine_name not in retried_engines
+                    and base_name not in retried_engines
                 ):
-                    retried_engines.add(engine_name)
+                    retried_engines.add(base_name)
                     try:
                         if storage_state:
                             raw_profile = (
@@ -606,7 +617,7 @@ class ScrapeJobURL:
                             f"NodriverPool discard failed ({discard_err}) — "
                             f"cold start will handle it."
                         )
-                    engines.append((f"{engine_name}-retry", launcher))
+                    engines.append((f"{base_name}-retry", launcher))
                     logger.info(
                         f"Engine '{engine_name}' browser died mid-navigation — "
                         f"discarded warm Chrome; retrying with a fresh launch."
@@ -633,18 +644,20 @@ class ScrapeJobURL:
             elif self._is_invalid_scrape_text(fetch["cleaned_text"]):
                 blocked_reason = "empty/unreadable content"
 
+            # F3: 404/410 means the posting itself is gone — NO other engine
+            # will do better, regardless of how much readable text the site's
+            # custom 404 page contains. This check MUST precede the
+            # blocked_reason gate, or wordy 404 pages leak into Gemini which
+            # then extracts imaginary jobs from the error page text.
+            if fetch["status_code"] in (404, 410):
+                logger.warning(
+                    f"Engine '{engine_name}' got HTTP {fetch['status_code']} "
+                    f"for '{domain}' — job posting appears to be gone."
+                )
+                await self._close_quietly(browser)
+                return "DEAD_LINK", fetch
+
             if blocked_reason:
-                # F3: 404/410 from the browser means the posting itself is gone —
-                # no other engine will do better. Return immediately so the caller
-                # produces a clean FAILED instead of looping through every engine
-                # and mislabeling a dead link as auth_required.
-                if fetch["status_code"] in (404, 410):
-                    logger.warning(
-                        f"Engine '{engine_name}' got HTTP {fetch['status_code']} "
-                        f"for '{domain}' — job posting appears to be gone."
-                    )
-                    await self._close_quietly(browser)
-                    return "DEAD_LINK", fetch
                 logger.warning(
                     f"Engine '{engine_name}' got {blocked_reason}. "
                     f"Trying next engine..."

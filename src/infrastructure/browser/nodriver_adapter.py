@@ -47,22 +47,38 @@ class NodriverAdapter(IBrowser):
         self._pool_managed: bool = False  # True when owned by NodriverPool
         self._chrome_pid: int | None = None  # captured at launch for force-kill backstop
 
-    async def launch(self, headless: bool = True, storage_state: dict[str, Any] | None = None) -> None:
-        """Launch nodriver Chrome browser, optionally reusing a persistent profile."""
+    async def launch(
+        self,
+        headless: bool = True,
+        storage_state: dict[str, Any] | None = None,
+        skip_orphan_kill: bool = False,
+    ) -> None:
+        """Launch nodriver Chrome browser, optionally reusing a persistent profile.
+
+        skip_orphan_kill: MUST be True when a cold launch could target a
+        profile already owned by a live NodriverPool warm Chrome — the orphan
+        kill runs BEFORE this flag could otherwise be set by the caller, and
+        it would taskkill the pool's live process (critical timing bug).
+        """
         self._headless = headless
+        self._skip_orphan_kill = skip_orphan_kill
         profile_dir = self._resolve_profile_dir(storage_state)
         logger.info(f"Launching nodriver (headless={headless})...")
         if profile_dir:
             logger.info(f"Using persistent Chrome profile: {profile_dir}")
-            # Clean up residual Chrome lock files from previous crashed/interrupted runs
-            for lock_name in ("lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"):
-                lock_file = Path(profile_dir) / lock_name
-                if lock_file.exists():
-                    try:
-                        lock_file.unlink(missing_ok=True)
-                        logger.info(f"Cleaned up residual Chrome lock: {lock_name}")
-                    except Exception as e:
-                        logger.debug(f"Could not delete Chrome lock {lock_name}: {e}")
+            if not self._skip_orphan_kill:
+                # Clean up residual Chrome lock files from previous crashed/interrupted runs.
+                # NEVER do this while a pool warm Chrome owns the profile —
+                # deleting its SingletonLock lets a second Chrome process write
+                # concurrently to the profile's SQLite DBs → "malformed disk image".
+                for lock_name in ("lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"):
+                    lock_file = Path(profile_dir) / lock_name
+                    if lock_file.exists():
+                        try:
+                            lock_file.unlink(missing_ok=True)
+                            logger.info(f"Cleaned up residual Chrome lock: {lock_name}")
+                        except Exception as e:
+                            logger.debug(f"Could not delete Chrome lock {lock_name}: {e}")
 
         # Build explicit browser args to guarantee headless on Windows
         # (nodriver's headless flag alone can be ignored on some Windows configs)
@@ -328,7 +344,7 @@ class NodriverAdapter(IBrowser):
                     import subprocess
 
                     subprocess.run(
-                        ["taskkill", "/F", "/PID", str(pid)],
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
                         capture_output=True,
                         timeout=5,
                     )
@@ -423,21 +439,27 @@ class NodriverAdapter(IBrowser):
             # processes (including the user's own browser).
             resolved = str(Path(profile_dir).resolve())
             safe_marker = resolved.replace("\\", "*").replace("/", "*")
-            result = subprocess.run(
-                [
-                    "powershell", "-NoProfile", "-Command",
-                    f"Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" "
-                    f"| Where-Object {{ $_.CommandLine -like '*{safe_marker}*' }} "
-                    f"| Select-Object -ExpandProperty ProcessId",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            pids = {int(line) for line in result.stdout.split() if line.strip().isdigit()}
-            for pid in pids:
-                logger.info(f"Killing orphan Chrome process (PID {pid}) locking profile: {safe_marker}")
-                subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, timeout=5)
+
+            def _kill_orphans_sync() -> None:
+                result = subprocess.run(
+                    [
+                        "powershell", "-NoProfile", "-Command",
+                        f"Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" "
+                        f"| Where-Object {{ $_.CommandLine -like '*{safe_marker}*' "
+                        f"-and $_.CommandLine -notlike '*{safe_marker}[0-9a-zA-Z_-]*' }} "
+                        f"| Select-Object -ExpandProperty ProcessId",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                pids = {int(line) for line in result.stdout.split() if line.strip().isdigit()}
+                for pid in pids:
+                    logger.info(f"Killing orphan Chrome process (PID {pid}) locking profile: {safe_marker}")
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=5)
+
+            # Blocking PowerShell round-trips (1-3s) must not freeze the event loop.
+            await asyncio.to_thread(_kill_orphans_sync)
         except Exception as e:
             logger.debug(f"Failed to kill orphan Chrome for {profile_dir}: {e}")
 

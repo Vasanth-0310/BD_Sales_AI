@@ -240,13 +240,41 @@ def _validate_salary(job_details: "JobDetails") -> "JobDetails":
     if not raw:
         return jd_drop_salary_info(job_details)
 
-    # ── Parse numbers ──────────────────────────────────────────────────
-    amounts = [
-        float(a.replace(",", ""))
-        for a in re.findall(r"\d[\d,]*(?:\.\d+)?", raw)
-    ]
+    # ── Parse numbers — currency-anchored ONLY ─────────────────────────
+    # A bare \d+ scan corrupts real salaries: "$80k - $120k" → 80/120, and
+    # "40 hrs/wk, $50/hr" → min=40 max=50. Only numbers that are part of a
+    # money expression count: preceded by a currency symbol, suffixed with
+    # a k/K multiplier, or followed by a currency code word.
+    amounts: list[float] = []
+    # NOTE: the symbol-on-first-number-only range branch ("$75 - 90k") MUST
+    # precede the plain symbol branch, or "$75" matches unscaled first and
+    # the pair corrupts into min=75, max=90,000.
+    money_re = re.compile(
+        r"([$€£₹])?\s*(\d[\d,]*(?:\.\d+)?)\s*[-–]\s*(\d[\d,]*(?:\.\d+)?)\s*(k)\b"
+        r"|([$€£₹])\s*(\d[\d,]*(?:\.\d+)?)\s*(k)?"
+        r"|\b(\d[\d,]*(?:\.\d+)?)\s*(k)\b"
+        r"|\b(\d[\d,]*(?:\.\d+)?)\s*(?:usd|inr|eur|gbp|cad|aud)\b",
+        re.I,
+    )
+    for m in money_re.finditer(raw):
+        groups = m.groups()
+        if groups[1]:                       # 75-90k / $75-90k range (k scales BOTH)
+            amounts.append(float(groups[1].replace(",", "")) * 1000)
+            amounts.append(float(groups[2].replace(",", "")) * 1000)
+        elif groups[4]:                     # $80,000 / $80k
+            amounts.append(float(groups[5].replace(",", "")) * (1000 if groups[6] else 1))
+        elif groups[7]:                     # 80k bare
+            amounts.append(float(groups[7].replace(",", "")) * 1000)
+        elif groups[9]:                     # 80,000 USD
+            amounts.append(float(groups[9].replace(",", "")))
     amounts = [a for a in amounts if a > 0]
     if not amounts:
+        # Raw has no parseable money figures — NEVER overwrite Gemini's
+        # numbers with garbage. Keep Gemini's values if it extracted any,
+        # otherwise drop the salary_info entirely (vague "Competitive salary").
+        existing = job_details.salary_info
+        if existing is not None and (existing.min_pay is not None or existing.max_pay is not None):
+            return job_details
         return jd_drop_salary_info(job_details)
     p_min = amounts[0]
     p_max = amounts[1] if len(amounts) > 1 else None

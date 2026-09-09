@@ -63,6 +63,13 @@ class BM25Rescorer:
             corpus.append(tokens)
             candidate_ids.append(str(payload.get(id_field, "")))
 
+        # GUARD: an all-empty corpus (every candidate's text fields empty or
+        # non-alphanumeric) makes BM25Okapi divide by avgdl == 0.0 and raises
+        # ZeroDivisionError — which would 500 the entire match request.
+        # Zero overlap legitimately means zero BM25 contribution.
+        if not any(corpus):
+            return {cid: 0.0 for cid in candidate_ids}
+
         # Tokenize query
         tokenized_query = _tokenize(query_text)
 
@@ -105,6 +112,13 @@ def rrf_merge(
     """
     rrf_scores: dict[str, float] = {}
 
+    # Zero-relevance items must NOT receive rank points: a BM25 score of 0.0
+    # means zero keyword overlap, yet ranked position would still award
+    # 1/(k+rank) based purely on dictionary order — an arbitrary boost for
+    # completely irrelevant candidates/projects.
+    dense_ranking = [(pid, s) for pid, s in dense_ranking if s and s > 0]
+    bm25_ranking = [(pid, s) for pid, s in bm25_ranking if s and s > 0]
+
     # Dense ranking contribution
     for rank, (pid, _score) in enumerate(dense_ranking, start=1):
         rrf_scores[pid] = rrf_scores.get(pid, 0.0) + 1.0 / (k + rank)
@@ -133,7 +147,8 @@ def _tokenize(text: str) -> list[str]:
     distinct tokens instead of all collapsing to ``c``/``net``/``node``
     (which made a C# JD match plain-C projects in BM25 rescoring).
     Matches the tokenizer used by the Qdrant keyword search (_keyword_tokens)
-    so both retrieval sides split terms identically.
+    so both retrieval sides split terms identically. Trailing sentence
+    punctuation is stripped so "python." doesn't fail to match "python".
     """
     tokens = re.findall(r"(?:\.NET|[A-Za-z][A-Za-z0-9+#.]*)", text)
-    return [t.lower() for t in tokens]
+    return [t.rstrip(".").lower() for t in tokens if t.rstrip(".")]

@@ -63,11 +63,15 @@ def extract_jd_keywords(jd_text: str, max_keywords: int = 40) -> str:
 
 
 def compact_job_details(jd_text: str, summary_chars: int = 700) -> str:
-    """Return a shorter JD string for LLM prompts while preserving key fields."""
+    """Return a shorter JD string for LLM prompts while preserving key fields.
 
+    Non-JSON JDs are capped at 6,000 chars (was 1,800): requirements and
+    skills frequently sit in the bottom half of long postings, and 1,800
+    characters silently amputates them before the LLM ever sees them.
+    """
     data = _parse_json_object(jd_text)
     if not data:
-        return truncate_text(jd_text, 1800)
+        return truncate_text(jd_text, 6000)
 
     keep_keys = (
         "title",

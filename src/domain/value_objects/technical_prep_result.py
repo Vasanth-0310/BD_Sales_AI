@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 @dataclass
@@ -51,6 +51,16 @@ class InterviewTopicOutput(BaseModel):
             "calibrated to the years of experience required in the job description."
         )
     )
+
+    @field_validator("focus", mode="before")
+    @classmethod
+    def _canonicalize_focus(cls, v):
+        """Gemini paraphrases the constant ("Weakness", "skill gap", "gap").
+        A raw Literal rejection fails the ENTIRE prep — canonicalize instead."""
+        if not isinstance(v, str) or not v.strip():
+            return "weakness"
+        low = v.strip().lower()
+        return "weakness" if "weak" in low or "gap" in low else "weakness"
 
 
 class TechnicalPrepOutput(BaseModel):

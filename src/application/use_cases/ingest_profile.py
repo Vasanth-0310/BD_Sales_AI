@@ -91,6 +91,11 @@ class IngestProfileUseCase:
                     "combined_text": combined_text,
                     "tech_stacks_text": " ".join(variant_dto.tech_stacks),
                 }
+                # A stored user_id=null is NOT matched by the tenant filter's
+                # is_empty clause in all Qdrant versions — omit the key
+                # entirely so unowned points stay legacy-tolerant.
+                if not payload.get("user_id"):
+                    payload.pop("user_id", None)
                 prepared.append({
                     "variant_id": variant_dto.variant_id,
                     "variant_title": variant_dto.variant_title,
@@ -113,6 +118,7 @@ class IngestProfileUseCase:
 
             # ── Step 6: Upsert each variant to Qdrant ────────────────────
             ingested_details: list[dict] = []
+            ingested_variant_ids: list[str] = []
             for item, vector in zip(prepared, vectors):
                 variant_start = time.perf_counter()
                 try:
@@ -121,6 +127,7 @@ class IngestProfileUseCase:
                         vector=vector,
                         payload=item["payload"],
                     )
+                    ingested_variant_ids.append(item["variant_id"])
                 except Exception as exc:
                     logger.error("[VARIANT %s] Upsert failed, writing to DLQ", item["variant_id"])
                     BackupService.backup_failed_profile(
@@ -143,6 +150,31 @@ class IngestProfileUseCase:
                 })
 
             total_time = time.perf_counter() - total_start
+
+            # Zombie-variant reconciliation: a re-ingest where the candidate
+            # removed or renamed variants in the source system must not leave
+            # stale variants matching queries forever. Runs AFTER all upserts
+            # succeeded — a failed ingest reconciles nothing. GATED OFF for
+            # partial payloads (differential sync) — deleting "stale" variants
+            # that simply weren't part of this partial payload would destroy
+            # the candidate's existing data (zero-deletion violation).
+            if ingested_variant_ids and dto.reconcile_variants:
+                try:
+                    removed = await self._vector_store_port.reconcile_profile_variants(
+                        candidate_id=dto.candidate_id,
+                        keep_variant_ids=ingested_variant_ids,
+                        user_id=dto.user_id or None,
+                    )
+                    if removed:
+                        logger.info(
+                            "[RECONCILE] Removed %d stale variant(s) for candidate %s",
+                            removed, dto.candidate_id,
+                        )
+                except Exception as reconcile_err:
+                    logger.warning(
+                        "Variant reconciliation failed (non-fatal): %s", reconcile_err
+                    )
+
             logger.info(
                 "======== PROFILE INGEST COMPLETE in %.2fs  |  variants=%d ========",
                 total_time,

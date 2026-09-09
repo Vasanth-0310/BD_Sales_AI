@@ -62,4 +62,17 @@ def sanitize_cookie(cookie: dict[str, Any]) -> dict[str, Any]:
     else:
         cookie["sameSite"] = same_site
 
+    # Normalise expires: CDP-captured session cookies carry "expires": None,
+    # and Playwright's new_context(storage_state=...) rejects None with
+    # TypeError ("expected float, got NoneType"). Session cookies must simply
+    # OMIT the field; numeric strings are coerced to float.
+    expires = cookie.get("expires")
+    if expires is None:
+        cookie.pop("expires", None)
+    elif isinstance(expires, str):
+        try:
+            cookie["expires"] = float(expires)
+        except ValueError:
+            cookie.pop("expires", None)
+
     return cookie

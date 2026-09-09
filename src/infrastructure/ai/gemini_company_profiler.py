@@ -166,12 +166,15 @@ class GeminiCompanyProfiler:
             )
 
             if self._metrics:
-                await self._metrics.increment(
-                    model=settings.gemini_model,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    operation="profile_company",
-                )
+                try:
+                    await self._metrics.increment(
+                        model=settings.gemini_model,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        operation="profile_company",
+                    )
+                except Exception as metrics_err:
+                    logger.warning(f"Metrics persist failed (non-fatal): {metrics_err}")
 
             profile = CompanyProfile.model_validate_json(response.text)
 

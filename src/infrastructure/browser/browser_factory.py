@@ -60,11 +60,16 @@ class BrowserFactory:
     async def launch_browser(
         headless: bool = True,
         storage_state: dict | None = None,
+        skip_orphan_kill: bool = False,
     ) -> IBrowser:
         """
         Return a LAUNCHED IBrowser, trying each engine in the fallback chain
         in order. The first engine whose launch succeeds wins; failures
         (missing binary, license denial, crash) fall through to the next.
+
+        skip_orphan_kill: forwarded to engines that support it (nodriver) —
+        must be True when the storage_state references a profile that a live
+        NodriverPool warm Chrome may already own.
 
         Raises:
             BrowserLaunchFailedException: If every engine in the chain fails.
@@ -73,7 +78,14 @@ class BrowserFactory:
         for engine_cls in _ENGINE_CHAIN:
             adapter = engine_cls()
             try:
-                await adapter.launch(headless=headless, storage_state=storage_state)
+                # nodriver accepts the flag; other engines ignore unknown kwargs
+                # via their own signature — pass explicitly only where supported.
+                import inspect
+                if "skip_orphan_kill" in inspect.signature(adapter.launch).parameters:
+                    await adapter.launch(headless=headless, storage_state=storage_state,
+                                         skip_orphan_kill=skip_orphan_kill)
+                else:
+                    await adapter.launch(headless=headless, storage_state=storage_state)
                 logger.info(f"BrowserFactory: launched {engine_cls.__name__}.")
                 return adapter
             except Exception as e:

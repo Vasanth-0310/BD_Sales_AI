@@ -64,7 +64,12 @@ def _empty_metrics() -> dict[str, Any]:
 
 
 def _load_metrics() -> dict[str, Any]:
-    """Load metrics from disk. Returns empty state if file does not exist."""
+    """Load metrics from disk. Returns empty state if file does not exist.
+
+    On a read/parse failure the corrupt file is FIRST moved aside (best
+    effort) so a later successful save can never be confused with, or
+    silently overwrite, recoverable history.
+    """
     if not _METRICS_FILE.exists():
         return _empty_metrics()
     try:
@@ -72,6 +77,10 @@ def _load_metrics() -> dict[str, Any]:
             return json.load(f)
     except Exception as e:
         logger.warning(f"Failed to load metrics file — resetting to zero. Reason: {e}")
+        try:
+            _METRICS_FILE.rename(_METRICS_FILE.with_name(_METRICS_FILE.name + ".corrupt"))
+        except Exception:
+            pass
         return _empty_metrics()
 
 
