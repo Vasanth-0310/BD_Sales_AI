@@ -48,6 +48,15 @@ class CandidateProfileSchema(BaseModel):
     passout_year: int
     dob: str = Field(..., description="Date of birth in YYYY-MM-DD format")
     branch: str
+    reconcile_variants: bool = Field(
+        default=True,
+        description=(
+            "True (default): a re-ingest DELETES this candidate's previously "
+            "stored variants that are absent from this payload (full-profile "
+            "sync semantics). Set False for PARTIAL payloads — e.g. single-"
+            "variant updates — so sibling variants are never destroyed."
+        ),
+    )
     variants: list[VariantSchema] = Field(
         ...,
         min_length=1,

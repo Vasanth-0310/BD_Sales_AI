@@ -274,18 +274,19 @@ class IVectorStorePort(ABC):
     async def delete_profile_variant_by_id(
         self,
         variant_id: str,
-        candidate_id: str,
+        candidate_id: str | None = None,
         user_id: str | None = None,
     ) -> bool:
         """
         Delete a single profile variant by its variant_id (Qdrant point ID).
 
-        Cross-checks that the variant belongs to the given candidate_id and
-        user_id (tenant scoping) before deletion.
+        When ``candidate_id`` is provided, cross-checks ownership against it.
+        Tenant ownership (``user_id``) is always enforced when supplied.
 
         Args:
             variant_id: The UUID string variant ID (Qdrant point ID).
-            candidate_id: The UUID string candidate ID for ownership check.
+            candidate_id: Optional candidate ownership cross-check (the
+                variant-only API omits it).
             user_id: Optional tenant user ID for multi-tenant scoping.
 
         Returns:
@@ -293,6 +294,19 @@ class IVectorStorePort(ABC):
 
         Raises:
             VectorStoreError: If the delete operation fails.
+        """
+        ...
+
+    @abstractmethod
+    async def scroll_project_chunks_with_vectors(
+        self, project_id: str, user_id: str | None = None,
+    ) -> list[dict]:
+        """
+        Read ALL chunk points (id/vector/payload) for a project — the
+        restorable capture used before a delete-before-write re-ingest.
+
+        Raises:
+            VectorStoreError: If the read fails.
         """
         ...
 

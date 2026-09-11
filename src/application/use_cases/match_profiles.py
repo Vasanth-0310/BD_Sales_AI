@@ -5,7 +5,7 @@ from src.domain.interfaces.rag.i_embedding_port import IEmbeddingPort
 from src.domain.interfaces.rag.i_vector_store_port import IVectorStorePort
 from src.domain.interfaces.rag.i_synthesizer_port import ISynthesizerPort
 from src.domain.exceptions.rag_exceptions import RAGBaseException
-from src.infrastructure.db.qdrant.bm25_rescorer import BM25Rescorer, rrf_merge
+from src.common.bm25_rescorer import BM25Rescorer, rrf_merge
 from src.common.jd_text import extract_jd_keywords
 from src.common.config import settings
 from src.application.dto.profile_dto import (

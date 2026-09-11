@@ -1,6 +1,6 @@
-﻿"""API router for Technical Preparation endpoints."""
+"""API router for Technical Preparation endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 
 from src.application.dto.preparation_dto import (
     BatchTechnicalPrepRequestDTO,
@@ -28,7 +28,7 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/v1/preparations", tags=["Technical Preparation"])
 
 
-# â”€â”€â”€ Dependency Injection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+#  Dependency Injection 
 
 def get_vector_store(request: Request) -> QdrantVectorStoreAdapter:
     return request.app.state.vector_store
@@ -48,7 +48,7 @@ def get_batch_prep_use_case(
     )
 
 
-# â”€â”€â”€ Endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+#  Endpoints 
 
 @router.post(
     "/technical",

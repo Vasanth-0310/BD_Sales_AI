@@ -60,7 +60,12 @@ def _windows_of_pids(pids: set[int], visible_only: bool) -> list[int]:
             targets.append(hwnd)
         return True
 
-    _user32.EnumWindows(_EnumWindowsProc(_callback), 0)
+    # Keep an explicit reference to the ctypes thunk for the whole call —
+    # belt-and-braces against the classic callback-collected-during-enum
+    # native crash (the temporary argument reference should suffice, but
+    # a native access violation here kills the entire server process).
+    callback_ref = _EnumWindowsProc(_callback)
+    _user32.EnumWindows(callback_ref, 0)
     return targets
 
 

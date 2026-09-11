@@ -29,9 +29,11 @@ class ProfileMatchResult(BaseModel):
     @field_validator("match_percentage", mode="before")
     @classmethod
     def _clamp_percentage(cls, v):
-        """Gemini occasionally emits out-of-range scores — never let them through."""
+        """Gemini occasionally emits out-of-range scores — never let them through.
+        Float-strings ("85.5") must parse as 85, NOT raise ValueError and
+        silently zero a strong candidate."""
         try:
-            v = int(v)
+            v = int(float(v))
         except (TypeError, ValueError):
             return 0
         return max(0, min(100, v))

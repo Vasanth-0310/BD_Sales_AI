@@ -22,10 +22,16 @@ _COMPANY_SEARCH_PROMPT = """You are a professional business intelligence researc
 
 Your task is to generate a structured company profile for "{company_name}".
 
-You have access to web search snippets below. Use them as your primary source of truth.
-If the snippets contain enough information about a field, use that.
-If the snippets are sparse or don't cover a field, use your own knowledge about this company to fill it in.
-Only return null for a field if you genuinely have no information at all — either from the snippets or your own knowledge.
+You have THREE sources of information, listed below in priority order:
+
+1. PAGE CONTEXT — facts extracted directly from the original job posting.
+   These are the most reliable because they come straight from the company's own listing.
+   Always prefer page context over search snippets when both cover the same field.
+2. SEARCH SNIPPETS — web search results about the company.
+   Use these to fill in fields NOT covered by the page context.
+3. YOUR OWN KNOWLEDGE — use only when neither source above covers a field.
+
+Only return null for a field if you genuinely have no information at all from any source.
 
 ENTITY MATCHING (critical):
 First verify that the snippets are actually about a company called "{company_name}".
@@ -34,15 +40,23 @@ If the snippets appear to be about a DIFFERENT company that merely has a similar
 return null for every field — a wrong profile for a similarly-named company is worse
 than no profile at all.
 
---- SEARCH SNIPPETS ---
+--- PAGE CONTEXT (extracted from the job posting — MOST SPECIFIC for what the company says about itself) ---
+{page_context}
+--- END PAGE CONTEXT ---
+
+--- WEB SEARCH SNIPPETS (independent third-party context — usually the ONLY source that mentions where the company is HEADQUARTERED) ---
 {search_snippets}
 --- END SNIPPETS ---
+
+SOURCE WEIGHING: you have BOTH sources. Weigh each claim by how specific and primary it is: the PAGE CONTEXT has the strongest say on what the company states about itself (overview, industry, products); the WEB SEARCH SNIPPETS typically carry the authoritative HQ information. Decide each field by which source is most convincing for THAT field, and resolve conflicts with evidence, not by defaulting to the job page.
 
 Generate a structured company profile with ONLY the following fields:
 - overview: A concise 2-3 sentence description of what the company does and its mission.
 - industry: The primary industry or sector (e.g. "Technology / Mobile Software", "Healthcare IT", "SaaS / Fintech", "BPO").
 - products_services: The main products or services they offer. Keep it concise (1-2 sentences).
-- headquarters: The HQ location as a structured object with four fields: 'raw' (the location text exactly as found), 'city', 'state', 'country'. Populate only the components actually present. Example: for HQ "Milpitas, California, USA" return raw="Milpitas, California, USA", city="Milpitas", state="California", country="USA". For work-mode-only values like "Remote / US Timezone Preferred" set only 'raw'. Return null if HQ is unknown.
+- headquarters: The HQ location as a structured object with four fields: 'raw' (the location text exactly as found), 'city', 'state', 'country'. Populate only the components actually present. Example: for HQ "Milpitas, California, USA" return raw="Milpitas, California, USA", city="Milpitas", state="California", country="USA". For work-mode-only values like "Remote / US Timezone Preferred" set only 'raw'. Return null if HQ is unknown. WORLD-KNOWLEDGE RESOLUTION (geography ONLY): a stated major city resolves to its country/state (e.g. "Bengaluru" → country="India", state="Karnataka") — but leave components null if the place is ambiguous or you are not certain.
+    SINGLE-LOCATION RULE: 'headquarters' is ONE place — the primary / registered office ONLY. If the source lists several offices or cities (e.g. "Kochi, Kerala, India; Bengaluru, India"), do NOT concatenate them into 'raw'; use ONLY the first (primary) one and populate city/state/country from that single location (raw="Kochi, Kerala, India", city="Kochi", state="Kerala", country="India").
+    NO JOB-CITY BIAS (critical): the "Company Location (from job page)" hint is where the JOB/ROLE is located — it is NOT the company's headquarters unless a source EXPLICITLY says the HQ is there. NEVER copy the job city into headquarters. Decide HQ from the source that actually states the company's registered/primary office (web-search snippets usually say "headquartered in X"), preferring the most specific statement; if NO source states the HQ explicitly, return null for headquarters. Also deduplicate: if a place appears with its country more than once (e.g. "Bengaluru, India, Karnataka, India"), state/country each appear exactly once.
 - location: The country or region the company primarily operates in (e.g. "UK", "USA", "Romania", "Global").
 
 Return valid JSON only."""
@@ -88,10 +102,20 @@ class GeminiCompanyProfiler:
             return "No search results found."
         return "\n\n".join(snippets)
 
-    async def profile(self, company_name: str) -> CompanyProfile | None:
+    async def profile(
+        self,
+        company_name: str,
+        page_location: str | None = None,
+        page_industry: str | None = None,
+        page_company_context: str | None = None,
+    ) -> CompanyProfile | None:
         """
         Search the web for the given company name and return a structured CompanyProfile.
         Returns None if profiling fails or company_name is empty/unknown.
+
+        Optional page-level hints (extracted from the job posting) are injected
+        into the Gemini prompt as the highest-priority context so the profile
+        reflects what the hiring company itself stated.
         """
         if not company_name or company_name.lower() in ("not specified", "unknown", "n/a", "confidential", ""):
             logger.info(f"[GeminiCompanyProfiler] Skipping profile for unresolved name: '{company_name}'")
@@ -110,6 +134,19 @@ class GeminiCompanyProfiler:
             self._profile_cache.pop(cache_key, None)
 
         logger.info(f"[GeminiCompanyProfiler] [STEP 1] Starting company profile for: '{company_name}'")
+
+        # ── Build page context from job-page hints ────────────────────────
+        page_hints: list[str] = []
+        if page_company_context:
+            page_hints.append(f"About the company (from job page):\n{page_company_context}")
+        if page_location:
+            page_hints.append(
+                f"Job Posting Location (where the ROLE sits — NOT necessarily "
+                f"the company HQ; never copy this into headquarters): {page_location}"
+            )
+        if page_industry:
+            page_hints.append(f"Industry (from job page): {page_industry}")
+        page_context = "\n".join(page_hints) if page_hints else "No page-level context available."
 
         # Step 2: Get live search snippets from DuckDuckGo (free, no quota).
         # Hard 6s cap — the search is a nice-to-have context boost, never
@@ -144,6 +181,7 @@ class GeminiCompanyProfiler:
         # Step 3: Ask Gemini to synthesize the snippets into a structured profile
         prompt = _COMPANY_SEARCH_PROMPT.format(
             company_name=company_name,
+            page_context=page_context,
             search_snippets=search_snippets,
         )
 

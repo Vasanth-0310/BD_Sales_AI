@@ -255,33 +255,6 @@ class NodriverAdapter(IBrowser):
         logger.info(f"Session captured: {len(cookies_list)} cookies.")
         return storage_state
 
-    async def fill_field(self, selector: str, value: str) -> None:
-        """Type a value into an element matching selector."""
-        if not self._tab:
-            raise RuntimeError("Browser not launched. Call launch() first.")
-        elem = await self._tab.select(selector)
-        if elem:
-            await elem.send_keys(value)
-
-    async def click_element(self, selector: str) -> None:
-        """Click an element matching selector."""
-        if not self._tab:
-            raise RuntimeError("Browser not launched. Call launch() first.")
-        elem = await self._tab.select(selector)
-        if elem:
-            await elem.click()
-
-    async def wait_for_url_change(self, from_url: str, timeout_ms: int = 30000) -> None:
-        """Wait until page URL changes away from from_url."""
-        if not self._tab:
-            raise RuntimeError("Browser not launched. Call launch() first.")
-        start_time = asyncio.get_event_loop().time()
-        timeout_sec = timeout_ms / 1000.0
-        while (asyncio.get_event_loop().time() - start_time) < timeout_sec:
-            if self._tab.url != from_url:
-                return
-            await asyncio.sleep(0.5)
-
     async def close(self) -> None:
         """Close the nodriver browser and release all resources.
 

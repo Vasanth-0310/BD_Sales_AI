@@ -221,6 +221,14 @@ async def ingest_project(
                 detail="Missing required field: 'case_study'",
             )
 
+        # A plain text form field with this name arrives as str, not
+        # UploadFile — reject cleanly instead of AttributeError-crashing.
+        if not hasattr(case_study, "read") or not hasattr(case_study, "filename"):
+            raise HTTPException(
+                status_code=400,
+                detail="Field 'case_study' must be a file upload, not a text field.",
+            )
+
         filename = case_study.filename or ""
 
         ext = (
@@ -238,11 +246,12 @@ async def ingest_project(
                 ),
             )
 
-        # Cap the read: a multi-GB upload would otherwise be buffered fully
-        # in RAM per request.
+        # Cap the read WITHOUT buffering the whole upload: read at most
+        # max+1 bytes — anything longer is rejected before it can eat RAM.
         _MAX_CASE_STUDY_BYTES = 20 * 1024 * 1024  # 20 MB
-        file_bytes = await case_study.read()
+        file_bytes = await case_study.read(_MAX_CASE_STUDY_BYTES + 1)
         if len(file_bytes) > _MAX_CASE_STUDY_BYTES:
+            await case_study.close()
             raise HTTPException(
                 status_code=413,
                 detail="Case study file too large (max 20 MB).",
@@ -279,8 +288,15 @@ async def ingest_project(
         )
 
     finally:
+        # Release the spooled temp-file handle — on Windows an unclosed
+        # UploadFile locks its %TEMP% file until process exit.
+        if case_study is not None and hasattr(case_study, "close"):
+            try:
+                await case_study.close()
+            except Exception:
+                pass
         reset_log_context(user_token, action_token, section_token)
-        
+
 @router.post(
     "/match",
     response_model=ProjectMatchResponse,
@@ -297,8 +313,7 @@ async def match_projects(
     the top 3 project matches with scores and justifications.
     """
     user_id = body.user_id
-    action = body.action
-        
+
     user_token, action_token, section_token = set_log_context(
         user_id=user_id,
         action="Match Projects to Job",
@@ -410,6 +425,9 @@ async def delete_project(
         )
     except ProjectNotFoundException as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        # Destructive-path guard: blank user_id is a client error, not a 500.
+        raise HTTPException(status_code=400, detail=str(exc))
     except VectorStoreError as exc:
         # Qdrant unreachable / retries exhausted — a service outage, not a
         # client error. Log full details, return a clean 503 without

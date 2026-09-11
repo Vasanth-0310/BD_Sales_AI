@@ -26,7 +26,7 @@ Lifecycle:
 
 import asyncio
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from src.common.config import settings
 from src.common.logger import get_logger

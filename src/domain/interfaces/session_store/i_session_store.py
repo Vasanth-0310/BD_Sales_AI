@@ -31,8 +31,3 @@ class ISessionStore(ABC):
     async def get_all_active_sessions(self) -> list[UserSession]:
         """Return all sessions with ACTIVE status. Used by the refresh scheduler."""
         ...
-
-    @abstractmethod
-    async def mark_session_expired(self, user_id: str, domain: str) -> None:
-        """Update the status of a session to EXPIRED."""
-        ...

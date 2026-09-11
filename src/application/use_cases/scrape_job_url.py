@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from src.domain.interfaces.extractor.i_extractor import IExtractor
@@ -336,7 +337,13 @@ class ScrapeJobURL:
                 )
             try:
                 job_details = await self._extractor.extract(cleaned_text)
-                company_profile = await self._company_profiler.profile(job_details.company)
+                company_context = self._extract_company_context(cleaned_text)
+                company_profile = await self._company_profiler.profile(
+                    company_name=job_details.company,
+                    page_location=job_details.location.raw if job_details.location else None,
+                    page_industry=job_details.industry,
+                    page_company_context=company_context,
+                )
             except Exception as e:
                 logger.error(f"Extraction failed for '{request.url}': [{type(e).__name__}] {e}", exc_info=True)
                 return JobResultDTO.failed(reason="Internal error: please check server logs.")
@@ -418,13 +425,102 @@ class ScrapeJobURL:
                 )
 
             job_details = await self._extractor.extract(cleaned_text)
-            company_profile = await self._company_profiler.profile(job_details.company)
+            company_context = self._extract_company_context(cleaned_text)
+            company_profile = await self._company_profiler.profile(
+                    company_name=job_details.company,
+                    page_location=job_details.location.raw if job_details.location else None,
+                    page_industry=job_details.industry,
+                    page_company_context=company_context,
+                )
             logger.info(f"Scrape successful (curl_cffi): '{job_details.title}' at '{job_details.company}'")
             return JobResultDTO.success(job_details=job_details, company_profile=company_profile)
 
         except Exception as e:
             logger.error(f"Scrape failed for '{request.url}': [{type(e).__name__}] {e}", exc_info=True)
             return JobResultDTO.failed(reason="Internal error: please check server logs.")
+
+    @staticmethod
+    def _extract_company_context(cleaned_text: str, max_chars: int = 1500) -> str | None:
+        """Extract the 'About company' section from scraped page text.
+
+        Two strategies, tried in order:
+        1. HEADER-BASED — "About company" / "About us" / etc. The body may sit
+           on the line AFTER the header OR on the SAME line (BeautifulSoup's
+           get_text("\n", strip=True) and platform-specific flattening produce
+           both renderings), so both are accepted.
+        2. TAIL-BASED (Naukri) — Naukri JD pages end with the ultra-stable
+           "Beware of imposters!" trailer. The company description always sits
+           immediately before it, so grab the text preceding that marker even
+           when no recognisable header label survived the HTML cleaning.
+
+        Returns None if no usable company section is found.
+        """
+        import re
+
+        def _trim(chunk: str) -> str | None:
+            """Cut junk at known section breaks; require a minimum size."""
+            chunk = chunk.strip()
+            if not chunk:
+                return None
+            section_break = re.search(
+                r"\n\s*(?:[A-Z][A-Z\s&/]{4,}\n|beware\s+of|report\s+this|similar\s+jobs|"
+                r"other\s+jobs|jobs\s+like\s+this|job\s+highlights|key\s*skills|"
+                r"role\s*&|posted\s+by|key\s+skills(?:\s*&|$))",
+                chunk,
+                re.IGNORECASE,
+            )
+            if section_break:
+                chunk = chunk[: section_break.start()].strip()
+            # Some platforms repeat the header INSIDE the body copy
+            chunk = re.sub(
+                r"(?i)^\s*(?:about\s+(?:the\s+)?(?:company|employer|us)\s*[:\-—]?\s*)",
+                "", chunk,
+            )
+            return chunk if len(chunk) >= 20 else None
+
+        # ── Strategy 1: header-based ──────────────────────────────────────
+        _ABOUT_HEADERS = (
+            r"about\s+(?:the\s+)?company",
+            r"about\s+(?:the\s+)?employer",
+            r"about\s+us",
+            r"company\s+(?:overview|description|profile|information|info)",
+            r"who\s+we\s+are",
+            r"about\s+(?:the\s+)?organization",
+        )
+        # Match the header at a line start, then EITHER a newline OR inline
+        # body text on the same line (e.g. "About company A robustly funded…").
+        pattern = re.compile(
+            r"(?:^|\n)\s*(" + "|".join(_ABOUT_HEADERS) + r")\s*[:\-—]?\s*(.+)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        match = pattern.search(cleaned_text)
+        if match:
+            chunk = (match.group(2) or "")[:max_chars]
+            trimmed = _trim(chunk)
+            if trimmed:
+                return trimmed
+
+        # ── Strategy 2: Naukri tail-anchor ("Beware of imposters") ────────
+        trailer_idx = cleaned_text.lower().rfind("beware of imposters")
+        if trailer_idx > 200:
+            # The company description is the last block before the trailer.
+            # Take a ~700-char window, then start AT A LINE BOUNDARY — a fixed
+            # cut lands mid-junk otherwise (e.g. unrelated section text
+            # preceding the About block on the page).
+            window = cleaned_text[max(0, trailer_idx - 700):trailer_idx]
+            nl = window.find("\n")
+            if nl != -1 and nl < 300:
+                window = window[nl + 1:]
+            chunk = window
+            # Drop trailing footer junk (Website: …, company-site link lines)
+            chunk = re.sub(
+                r"(?is)\n?\s*(?:website\s*:.*|https?://\S+)\s*$", "", chunk,
+            )
+            trimmed = _trim(chunk)
+            if trimmed:
+                return trimmed
+
+        return None
 
     @staticmethod
     def _write_debug_text(domain: str, cleaned_text: str) -> None:

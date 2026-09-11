@@ -52,7 +52,12 @@ class AnalyzeManualEntry:
             if company_name_to_profile:
                 logger.info(f"Generating company profile for '{company_name_to_profile}'...")
                 try:
-                    company_profile = await self._profiler.profile(company_name_to_profile)
+                    company_profile = await self._profiler.profile(
+                        company_name=company_name_to_profile,
+                        page_location=job_details.location.raw if job_details.location else None,
+                        page_industry=job_details.industry,
+                        page_company_context=dto.additional_notes,
+                    )
                 except Exception as e:
                     logger.warning(f"Company profiling failed for '{company_name_to_profile}': {e}")
                     # We continue even if profiling fails

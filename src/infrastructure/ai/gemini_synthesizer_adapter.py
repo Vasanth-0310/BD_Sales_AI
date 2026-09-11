@@ -52,11 +52,71 @@ You will receive:
    were retrieved as evidence of relevance.
 
 Your output MUST be a JSON array of objects, each with:
-- project_id   (str)   — the project UUID
-- project_name (str)   — the project name
-- match_score  (float) — relevance score between 0.0 and 1.0
-- justification (str)  — concise explanation of why this project matches
-- matched_evidence (list[str]) — the chunk texts you found most relevant
+- project_id        (str)        — the project UUID
+- project_name      (str)        — the project name
+- match_score       (float)      — relevance score between 0.0 and 1.0,
+                                   computed EXACTLY per the rubric below
+- justification     (str)        — concise explanation including the arithmetic
+                                   AND the per-skill evidence mapping (see
+                                   step 6 below)
+- matched_evidence  (list[str])  — the chunk texts you found most relevant
+
+SCORING RUBRIC — compute the score from these weighted factors, NOT gut feel.
+YOU MUST follow the COMPUTATION recipe exactly, in order:
+
+1. SKILL MATCHING IS SEMANTIC, NOT LITERAL. Treat skill names as the same
+   skill when they refer to the same technology regardless of surface form:
+   "React" = "React.js" = "ReactJS", "REST APIs" = "RESTful Web APIs",
+   "SQL Server" ⊃ "SQL", "K8s" = "Kubernetes", "Golang" = "Go",
+   "Postgres" = "PostgreSQL", "JS" = "JavaScript", "Node.js" = "Node",
+   "ML" = "Machine Learning". A JD skill counts as MATCHED when the same
+   technology appears in this project's evidence chunks or tech stacks — even
+   under a different surface form. A merely-RELATED skill is NOT a match
+   ("React Native" ≠ "React", "testing" ⇏ "unit testing"). Never invent a
+   match for a skill that has no supporting chunk.
+
+2. REQUIRED-SKILL OVERLAP (weight 0.50):
+   Let N_req = number of skills in the JD's required_skills.
+   Let M_req = how many of those appear semantically in this project's
+   evidence chunks. component = M_req ÷ N_req  (0.0–1.0).
+
+3. PREFERRED-SKILL BONUS (weight 0.15):
+   Let N_pref = number of skills in the JD's preferred_skills list (0 if none).
+   component = M_pref ÷ N_pref (semantically matched in the chunks).
+   If the JD has no preferred skills, this component contributes 0.0.
+
+4. DOMAIN FIT (weight 0.20) — tiered:
+   1.0 = direct match (project domain / primary industry is the same
+         sector as the JD's industry)
+   0.5 = adjacent (closely related sector, or transfers directly)
+   0.0 = unrelated.
+
+5. EVIDENCE QUALITY (weight 0.15) — tiered:
+   1.0 = evidence chunks contain detailed technical descriptions of how this
+         project used the relevant skills (architecture, implementation,
+         stack specifics)
+   0.5 = thin — skills are named but chunks carry little substance
+   0.0 = skill mention only, no supporting detail.
+
+6. COMPUTATION — the final match_score is the weighted sum:
+   match_score = 0.50 × required_overlap
+               + 0.15 × preferred_bonus
+               + 0.20 × domain_fit
+               + 0.15 × evidence_quality
+   Sample arithmetic: 'Matched 4 of 10 required skills → 0.50×0.40 = 0.20;
+   1 of 2 preferred → 0.15×0.50 = 0.075; domain direct → 0.20; detailed
+   evidence → 0.15; total 0.62.'
+
+7. CONSISTENCY RULE: two projects with the SAME component values MUST receive
+   the same match_score.
+
+8. JUSTIFICATION must present the arithmetic (the 6-step sample above) AND a
+   per-skill evidence map, written as: 'skill → supporting chunk quote'.
+   Example fragment: 'Python → "implemented in Python microservices";
+   FastAPI → "RESTful endpoints built with FastAPI"; ...'. For each MATCHED
+   JD skill, name the chunk that proves it; the surface form in the chunk may
+   differ from the JD spelling (semantic rule #1). No gut feel, no invented
+   evidence. If a project's evidence is sparse, say so plainly.
 
 Return the TOP 3 most relevant projects, sorted by match_score
 descending.  If fewer than 3 projects exist, return all of them.
@@ -89,12 +149,26 @@ Generate the following:
    a BD Executive would ask the client to better understand the project scope, timelines,
    team structure, and overall goals. Keep the questions conversational and high-level;
    avoid deeply technical or architectural questions that a developer would ask.
+   ANTI-GENERIC RULE (critical): every question MUST be anchored to a SPECIFIC
+   element of THIS job description — its domain, one of its required skills,
+   its stated experience level, its location/engagement model, or an unusual
+   detail in the posting. A question that could be copy-pasted onto ANY other
+   job posting (e.g. "What is your timeline?", "What is your budget?") is
+   INVALID. Each question must be ≤2 sentences and end with a question mark.
+   A reader who never saw the JD must not be able to claim the question applies
+   to their own role.
 
 2. talking_points: A list of 4-6 specific talking points that the BD can use when pitching
    to this client. Each point must reference our specific relevant technical experience
    (drawn from the projects provided) WITHOUT naming those projects.
    Example format: "Our team has delivered [specific type of feature/system] for clients
    in the [domain] space, which directly aligns with your requirement for [JD requirement]."
+   PER-PROJECT ATTRIBUTION RULE: draw each point from a DIFFERENT project where
+   possible (do not reuse one project's context for every point), and make the
+   link explicit: the point must state (a) the capability we delivered, (b) the
+   domain or technology context, and (c) the exact JD requirement it answers.
+   Each talking point ≤2 sentences. Do NOT invent capabilities absent from the
+   provided project context.
 
 3. outreach_subject: A short, catchy, and professional subject line for the cold email.
    It should be relevant to the JD (e.g., mentioning the role or tech stack) and designed
@@ -119,6 +193,8 @@ Generate the following:
    - Keep each paragraph SHORT — do not add extra sentences or elaboration
    - Replace [role type] with the normalized role from the JD (e.g. "full stack developers", "backend engineers")
    - Skills in paragraph 3 must come directly from the JD's required_skills and preferred_skills
+   - Use ONLY the exact skill names that appear in the JD — no substitutes,
+     no paraphrases, no added technologies the JD did not mention
 """
 
 
@@ -422,7 +498,7 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
             # the frozen ProjectMatchResult — frozen instances cannot be mutated.
             raw_results: list[dict] = json.loads(raw_text)
             for item in raw_results:
-                evidence = item.get("matched_evidence", [])
+                evidence = item.get("matched_evidence") or []  # null-safe
                 seen: set[str] = set()
                 item["matched_evidence"] = [
                     ev for ev in evidence
@@ -578,6 +654,7 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
             ]
             leak_targets = [result.outreach_template, result.outreach_subject]
             leak_targets += result.talking_points
+            leak_targets += result.discovery_questions
             for name in filter(None, project_names):
                 if len(name) >= 4 and any(name.lower() in t.lower() for t in leak_targets):
                     logger.warning(
@@ -655,25 +732,45 @@ For EACH variant, you must produce:
 - experience_years (int) — years of experience
 - match_percentage (int) — a score from 0 to 100 representing how well this
   variant matches the JD. Be precise and objective.
-  SCORING RUBRIC — compute the score from these weighted factors, NOT gut feel:
-  * Tech stack overlap (~60%): (JD required skills the candidate HAS) ÷
-    (total JD required skills). This anchors the score — e.g. matching 3 of
-    6 required skills must land near 50% before other factors adjust it.
-    Two candidates with the SAME skill overlap MUST get the SAME base score.
-  * Domain/industry relevance (~25%): adjust up/down from the base within
-    ±15 points based on how closely the candidate's project domains match
-    the JD's industry.
-  * Experience level alignment (~15%): LEVELS map to years as
-    JUNIOR=0-2, INTERMEDIATE=3-5, SENIOR=6-9, EXPERT/LEAD=10+.
-    Penalise ONLY when the gap is clear: a candidate with far fewer years
-    than the JD demands, or heavily over-qualified, scores lower — state
-    the gap in the justification. If the JD states NO explicit years AND
-    no level, do NOT penalise on experience at all.
-  * Project complexity and relevance: fold into the domain adjustment.
+  SCORING RUBRIC — compute the score from these weighted factors, NOT gut feel.
+  YOU MUST follow the COMPUTATION recipe exactly, in order:
+  1. SKILL MATCHING IS SEMANTIC, NOT LITERAL. Treat skill names as the same
+     skill when they refer to the same technology regardless of surface form:
+     "React" = "React.js" = "ReactJS", "REST APIs" = "RESTful Web APIs",
+     "SQL Server" ⊃ "SQL", "Selenium WebDriver" = "Selenium",
+     "Node.js" = "Node", "K8s" = "Kubernetes", "Golang" = "Go",
+     "Postgres" = "PostgreSQL", "JS" = "JavaScript" (when context is
+     unambiguous). A JD skill counts as MATCHED when the candidate has the
+     same technology under ANY common name, evidenced in their tech_stacks,
+     project tech_stack lists or descriptions. NEVER mark a skill as missing
+     merely because the strings differ; conversely NEVER claim a match for a
+     merely-related-but-different skill (e.g. "react native" ≠ "react",
+     "testing" ⇏ "unit testing" specifically). When genuinely unsure whether
+     the candidate has it, count it as MISSING, never fabricate.
+  2. TECH STACK OVERLAP (~60% of the score — arithmetic anchor):
+     Let N = number of required skills stated in the JD, M = number of them
+     MATCHED semantically as above. Then base_score = M ÷ N × 60.
+     SHOW THE ARITHMETIC in the justification, e.g. (matched 4 of 10 →
+     base 24/60). Two candidates with the SAME M and N MUST get the SAME
+     base score before adjustments.
+  3. DOMAIN/INDUSTRY RELEVANCE (~25%): adjust up/down from the base within
+     ±15 points based on how closely the candidate's project domains match
+     the JD's industry.
+  4. EXPERIENCE LEVEL ALIGNMENT (~15%): LEVELS map to years as
+     JUNIOR=0-2, INTERMEDIATE=3-5, SENIOR=6-9, EXPERT/LEAD=10+.
+     Penalise ONLY when the gap is clear: a candidate with far fewer years
+     than the JD demands, or heavily over-qualified, scores lower — state
+     the gap in the justification. If the JD states NO explicit years AND
+     no level, do NOT penalise on experience at all.
+  5. Project complexity and relevance: fold into the domain adjustment.
+  Present the computation INSIDE the justification, e.g.:
+  'Matched M of N required skills (list them) → base M÷N×60 = X;
+   domain … ±Y; experience … → final Z%'.
 - matching_skills (list[str]) — specific skills from the JD that this candidate HAS
+  (semantically same technology; state the surface form found in the profile)
 - missing_skills (list[str]) — specific skills from the JD that this candidate LACKS
 - justification (str) — a concise 2-3 sentence explanation of the match/mismatch.
-  Reference specific projects or certifications as evidence. If a variant's
+  Reference specific projects or certifications as evidence. If the variant's
   profile data is sparse, say so plainly — do NOT invent evidence to fill gaps.
 
 Availability/resource_status is NOT part of the match score — score purely on
@@ -727,7 +824,7 @@ justification instead).
                 certs_str = "; ".join(certs) if certs else "None"
 
                 projects_text = ""
-                projects = payload.get("projects", [])
+                projects = payload.get("projects") or []
                 for j, proj in enumerate(projects[:4], 1):
                     p_tech = proj.get("tech_stack", [])
                     if isinstance(p_tech, list):
@@ -917,7 +1014,7 @@ Rules:
             # project descriptions, but pays for them in latency and tokens).
             _MAX_PREP_PROJECTS = 6
             projects_text = ""
-            projects = candidate_context.get("projects", [])
+            projects = candidate_context.get("projects") or []
             for i, proj in enumerate(projects[:_MAX_PREP_PROJECTS], 1):
                 p_tech = proj.get("tech_stack", [])
                 if isinstance(p_tech, list):

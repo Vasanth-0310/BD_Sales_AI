@@ -13,7 +13,7 @@ from src.infrastructure.file_processing.document_extractor import DocumentExtrac
 from src.infrastructure.db.qdrant.semantic_chunker import SemanticChunker
 from src.application.dto.project_dto import IngestProjectDTO
 from src.common.logger import get_logger
-from src.common.backup_service import BackupService
+from src.infrastructure.backup_service import BackupService
 
 
 logger = get_logger(__name__)
@@ -136,6 +136,29 @@ class IngestProjectUseCase:
 
             try:
                 logger.info(f"[STEP 7.1] Deleting any existing data for project '{project.project_id}'")
+                # Capture the existing chunks in restorable form BEFORE the
+                # Capture the existing chunks in restorable form BEFORE the
+                # delete — if the new ingest then fails, the DLQ entry holds
+                # everything needed to put the old project back. If the CAPTURE
+                # itself fails, we must ABORT the re-ingest: proceeding to
+                # delete without a capture would leave the DLQ empty and the
+                # old project destroyed if the new upserts fail.
+                captured_chunks: list[dict] = []
+                try:
+                    captured_chunks = await self._vector_store_port.scroll_project_chunks_with_vectors(
+                        project.project_id, user_id=getattr(dto, "user_id", None) or None,
+                    )
+                    if captured_chunks:
+                        logger.info(
+                            f"[STEP 7.1] Captured {len(captured_chunks)} existing chunk(s) "
+                            f"to the DLQ for rollback."
+                        )
+                except Exception as capture_err:
+                    raise RuntimeError(
+                        "Chunk capture failed before re-ingest delete — "
+                        f"aborting to avoid destroying the existing data: {capture_err}"
+                    ) from capture_err
+
                 await self._vector_store_port.delete_project(
                     project.project_id, user_id=getattr(dto, "user_id", None) or None,
                 )
@@ -165,6 +188,7 @@ class IngestProjectUseCase:
                     project_id=dto.project_id,
                     project_name=dto.project_name,
                     error_msg=str(exc),
+                    orphaned_chunks=captured_chunks,
                     summary_text=summary_text,
                     chunks_count=len(project_chunks)
                 )

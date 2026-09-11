@@ -1,7 +1,7 @@
 """Client-side BM25 rescoring and Reciprocal Rank Fusion (RRF) utility."""
 
 import re
-from rank_bm25 import BM25Okapi
+from rank_bm25 import BM25Plus
 from src.common.logger import get_logger
 
 logger = get_logger(__name__)
@@ -74,7 +74,13 @@ class BM25Rescorer:
         tokenized_query = _tokenize(query_text)
 
         # BM25 scoring
-        bm25 = BM25Okapi(corpus)
+        # BM25Plus instead of BM25Okapi: BM25Plus floors IDF above zero
+        # (delta parameter), so skills that appear in >50% of a SMALL
+        # candidate pool (e.g. "Python" among 8 backend devs) keep POSITIVE
+        # scores. With Okapi those candidates scored NEGATIVE and were then
+        # discarded by the RRF zero-score filter — silently dropping the
+        # best-matching candidates.
+        bm25 = BM25Plus(corpus, delta=0.25)
         scores = bm25.get_scores(tokenized_query)
 
         result = {cid: float(score) for cid, score in zip(candidate_ids, scores)}

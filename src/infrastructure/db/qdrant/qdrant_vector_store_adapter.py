@@ -890,12 +890,14 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
     async def delete_profile_variant_by_id(
         self,
         variant_id: str,
-        candidate_id: str,
+        candidate_id: str | None = None,
         user_id: str | None = None,
     ) -> bool:
         """Delete a single profile variant by its variant_id (point ID).
 
-        Cross-checks candidate_id and tenant ownership before deletion.
+        When ``candidate_id`` is provided, the point is cross-checked against
+        it (variant must belong to that candidate). Tenant ownership is
+        always enforced when ``user_id`` is given.
         Returns True if the variant was found and deleted, False if not found.
         """
         start = time.perf_counter()
@@ -918,15 +920,17 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
             point = points[0]
             payload = point.payload or {}
 
-            # Cross-check: variant must belong to the specified candidate
-            stored_candidate = payload.get("candidate_id", "")
-            if stored_candidate != candidate_id:
-                logger.warning(
-                    "delete_profile_variant_by_id: variant_id=%s belongs to "
-                    "candidate '%s', not '%s' — access denied",
-                    variant_id, stored_candidate, candidate_id,
-                )
-                return False
+            # Cross-check ONLY when a candidate_id was supplied — the
+            # variant-only API addresses the point by ID without one.
+            if candidate_id:
+                stored_candidate = payload.get("candidate_id", "")
+                if stored_candidate != candidate_id:
+                    logger.warning(
+                        "delete_profile_variant_by_id: variant_id=%s belongs to "
+                        "candidate '%s', not '%s' — access denied",
+                        variant_id, stored_candidate, candidate_id,
+                    )
+                    return False
 
             # Tenant check: if user_id is provided, the point must match
             if user_id:
@@ -1026,6 +1030,70 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
             ) from exc
 
     # ─── Sync Support Methods ────────────────────────────────────────────
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=True,
+    )
+    async def scroll_project_chunks_with_vectors(
+        self, project_id: str, user_id: str | None = None,
+    ) -> list[dict]:
+        """Read ALL chunk points (id/vector/payload) for a project.
+
+        Used by project re-ingest to capture the previously-stored data in a
+        restorable form BEFORE the delete-before-write step runs — if the new
+        ingest then fails, the old chunks can be recovered from the DLQ
+        instead of being lost forever.
+        """
+        start = time.perf_counter()
+        try:
+            must_base = [
+                FieldCondition(
+                    key="project_id",
+                    match=MatchValue(value=project_id),
+                )
+            ]
+            tenant = self._tenant_filter(user_id)
+            if tenant is not None:
+                must_base.append(tenant)
+
+            records: list[dict] = []
+            offset = None
+            while True:
+                points, next_offset = await self._client.scroll(
+                    collection_name=self._chunks_collection,
+                    scroll_filter=Filter(must=must_base),
+                    limit=100,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=True,
+                )
+                for point in points:
+                    vector = point.vector
+                    if not isinstance(vector, list):
+                        vector = list(vector.values()) if vector else []
+                    records.append({
+                        "id": str(point.id),
+                        "vector": vector,
+                        "payload": point.payload or {},
+                    })
+                if next_offset is None:
+                    break
+                offset = next_offset
+
+            elapsed = time.perf_counter() - start
+            logger.info(
+                "scroll_project_chunks_with_vectors completed in %.3fs  |  "
+                "project_id=%s  chunks=%d",
+                elapsed, project_id, len(records),
+            )
+            return records
+        except Exception as exc:
+            logger.error("scroll_project_chunks_with_vectors failed: %s", exc)
+            raise VectorStoreError(
+                reason=f"Chunk capture failed for {project_id}. Details logged."
+            ) from exc
 
     @retry(
         stop=stop_after_attempt(3),

@@ -105,10 +105,3 @@ class MongoDBSessionRepository(ISessionStore):
                 "some sessions will not be refreshed this cycle."
             )
         return [_from_document(doc) for doc in docs]
-
-    async def mark_session_expired(self, user_id: str, domain: str) -> None:
-        await self._collection.update_one(
-            {"user_id": user_id, "website": domain},
-            {"$set": {"status": SessionStatus.EXPIRED.value, "updated_at": datetime.utcnow()}},
-        )
-        logger.info(f"Session marked EXPIRED for user '{user_id}' on '{domain}'.")

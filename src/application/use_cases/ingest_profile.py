@@ -10,7 +10,7 @@ from src.application.dto.profile_dto import (
     IngestProfileResponseDTO,
 )
 from src.common.logger import get_logger
-from src.common.backup_service import BackupService
+from src.infrastructure.backup_service import BackupService
 
 
 logger = get_logger(__name__)
@@ -129,7 +129,11 @@ class IngestProfileUseCase:
                     )
                     ingested_variant_ids.append(item["variant_id"])
                 except Exception as exc:
-                    logger.error("[VARIANT %s] Upsert failed, writing to DLQ", item["variant_id"])
+                    logger.error(
+                        "[VARIANT %s] Upsert failed, writing to DLQ (%d variant(s) "
+                        "already committed before this failure)",
+                        item["variant_id"], len(ingested_variant_ids),
+                    )
                     BackupService.backup_failed_profile(
                         candidate_id=dto.candidate_id,
                         variant_id=item["variant_id"],

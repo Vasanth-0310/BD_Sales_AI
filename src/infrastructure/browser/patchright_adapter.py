@@ -352,28 +352,6 @@ class PatchrightAdapter(IBrowser):
             raise RuntimeError("Browser not launched. Call launch() first.")
         return await self._context.storage_state()
 
-    async def fill_field(self, selector: str, value: str) -> None:
-        """Type a value into an input field."""
-        if not self._page:
-            raise RuntimeError("Browser not launched. Call launch() first.")
-        await self._page.fill(selector, value)
-
-    async def click_element(self, selector: str) -> None:
-        """Click an element."""
-        if not self._page:
-            raise RuntimeError("Browser not launched. Call launch() first.")
-        await self._page.click(selector)
-
-    async def wait_for_url_change(self, from_url: str, timeout_ms: int = 30000) -> None:
-        """Wait until the page URL changes away from from_url."""
-        if not self._page:
-            raise RuntimeError("Browser not launched. Call launch() first.")
-        await self._page.wait_for_function(
-            "(fromUrl) => window.location.href !== fromUrl",
-            arg=from_url,
-            timeout=timeout_ms,
-        )
-
     async def _wait_for_readable_content(self, timeout_ms: int = 10000) -> None:
         """Wait until visible text looks like a job page rather than an SPA shell."""
         if not self._page:

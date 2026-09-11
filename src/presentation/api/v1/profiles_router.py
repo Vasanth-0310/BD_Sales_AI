@@ -9,8 +9,28 @@ from src.application.dto.profile_dto import (
 )
 from src.application.use_cases.ingest_profile import IngestProfileUseCase
 from src.application.use_cases.match_profiles import MatchProfilesUseCase
-from src.application.use_cases.delete_profile import DeleteProfileUseCase, CandidateNotFoundException, VariantNotFoundException
+from src.application.use_cases.delete_profile import (
+    DeleteProfileUseCase,
+    DeleteProfileVariantUseCase,
+    CandidateNotFoundException,
+    VariantNotFoundException,
+)
 from src.domain.exceptions.rag_exceptions import VectorStoreError
+import uuid as _uuid
+
+
+def _require_uuid(value: str, field: str) -> None:
+    """Reject malformed IDs with a 400 instead of letting Qdrant return a
+    400 that the delete path mislabels as a 503 outage."""
+    try:
+        _uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{field}' is not a valid UUID: '{value}'. "
+                   "Variant and candidate IDs are UUIDs copied from the "
+                   "profile-match or ingest response.",
+        )
 from src.infrastructure.ai.cached_embedding_adapter import CachedEmbeddingAdapter
 from src.infrastructure.ai.gemini_synthesizer_adapter import GeminiSynthesizerAdapter
 from src.infrastructure.db.qdrant.qdrant_vector_store_adapter import QdrantVectorStoreAdapter
@@ -148,6 +168,7 @@ async def ingest_profile(
             dob=profile.dob,
             branch=profile.branch,
             user_id=user_id,
+            reconcile_variants=profile.reconcile_variants,
             variants=variant_dtos,
         )
 
@@ -243,7 +264,7 @@ async def match_profiles(
 
     finally:
         reset_log_context(user_token, action_token, section_token)
-# ─── Delete Candidate Profile ──────────────────────────────────────────────
+# ─── Delete APIs (profile & variant are SEPARATE operations) ───────────────
 
 def get_delete_profile_use_case(
     vector_store: QdrantVectorStoreAdapter = Depends(get_vector_store),
@@ -251,27 +272,27 @@ def get_delete_profile_use_case(
     return DeleteProfileUseCase(vector_store_port=vector_store)
 
 
+def get_delete_variant_use_case(
+    vector_store: QdrantVectorStoreAdapter = Depends(get_vector_store),
+) -> DeleteProfileVariantUseCase:
+    return DeleteProfileVariantUseCase(vector_store_port=vector_store)
+
+
 @router.delete(
     "/candidates/{candidate_id}",
     response_model=DeleteProfileResponse,
-    summary="Delete all profile variants for a candidate",
+    summary="Delete a candidate's profile data (including ALL its variants)",
 )
-async def delete_candidate_profiles(
+async def delete_candidate_profile(
     user_id: str,
     candidate_id: str,
-    variant_id: Optional[str] = None,
-    action: str = "delete_profiles",
     use_case: DeleteProfileUseCase = Depends(get_delete_profile_use_case),
 ) -> DeleteProfileResponse:
     """
-    Permanently deletes profile variants for a given candidate_id
-    from the vector store.
+    Permanently deletes a candidate's entire profile data — the profile
+    itself along with ALL of its stored variants — from the vector store.
 
-    - If **variant_id** is provided, deletes only that single variant
-      (cross-checked against candidate_id for safety).
-    - If **variant_id** is omitted, deletes ALL variants for the candidate.
-
-    Returns 404 if the candidate_id or variant_id does not exist.
+    Returns 404 if the candidate does not exist (or belongs to another tenant).
     """
 
     user_token, action_token, section_token = set_log_context(
@@ -280,59 +301,86 @@ async def delete_candidate_profiles(
         section="Profiles",
     )
 
+    _require_uuid(candidate_id, "candidate_id")
     try:
-        if variant_id:
-            logger.info(
-                "Removing single variant '%s' for candidate '%s'",
-                variant_id, candidate_id,
-            )
-        else:
-            logger.info(
-                "Removing all variants for candidate '%s'",
-                candidate_id,
-            )
+        logger.info("Removing candidate profile '%s' (all variants)", candidate_id)
 
         count = await use_case.execute(
             candidate_id=candidate_id,
             user_id=user_id,
-            variant_id=variant_id,
         )
-
-        if variant_id:
-            message = (
-                f"Variant '{variant_id}' for candidate "
-                f"'{candidate_id}' has been deleted."
-            )
-        else:
-            message = (
-                f"All {count} profile variant(s) for candidate "
-                f"'{candidate_id}' have been deleted."
-            )
 
         return DeleteProfileResponse(
             status="SUCCESS",
-            message=message,
+            message=(
+                f"Candidate '{candidate_id}' profile data deleted "
+                f"including all {count} variant(s)."
+            ),
         )
 
     except CandidateNotFoundException as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=str(exc),
-        )
-    except VariantNotFoundException as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=str(exc),
-        )
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        # Destructive-path guard: blank user_id is a client error, not a 500.
+        raise HTTPException(status_code=400, detail=str(exc))
     except VectorStoreError as exc:
-        # Qdrant unreachable / retries exhausted — a service outage, not a
-        # client error. Log full details, return a clean 503 without
-        # leaking internals.
         logger.error("Qdrant unavailable during profile delete: %s", exc)
         raise HTTPException(
             status_code=503,
             detail="Knowledge base is temporarily unavailable. Please retry shortly.",
         )
+    finally:
+        reset_log_context(user_token, action_token, section_token)
 
+
+@router.delete(
+    "/variants/{variant_id}",
+    response_model=DeleteProfileResponse,
+    summary="Delete a single profile variant by its variant_id (no candidate_id needed)",
+)
+async def delete_profile_variant(
+    user_id: str,
+    variant_id: str,
+    use_case: DeleteProfileVariantUseCase = Depends(get_delete_variant_use_case),
+) -> DeleteProfileResponse:
+    """
+    Permanently deletes ONE profile variant, addressed purely by its
+    **variant_id** — no candidate_id required.
+
+    Tenant ownership is still enforced: a variant stored under a different
+    user_id returns 404 (indistinguishable from "not found").
+    """
+
+    user_token, action_token, section_token = set_log_context(
+        user_id=user_id,
+        action="Remove Variant",
+        section="Profiles",
+    )
+
+    _require_uuid(variant_id, "variant_id")
+    try:
+        logger.info("Removing variant '%s'", variant_id)
+
+        await use_case.execute(
+            variant_id=variant_id,
+            user_id=user_id,
+        )
+
+        return DeleteProfileResponse(
+            status="SUCCESS",
+            message=f"Variant '{variant_id}' has been deleted.",
+        )
+
+    except VariantNotFoundException as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        # Destructive-path guard: blank user_id is a client error, not a 500.
+        raise HTTPException(status_code=400, detail=str(exc))
+    except VectorStoreError as exc:
+        logger.error("Qdrant unavailable during variant delete: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Knowledge base is temporarily unavailable. Please retry shortly.",
+        )
     finally:
         reset_log_context(user_token, action_token, section_token)

@@ -37,7 +37,7 @@ from urllib.parse import urlparse
 # =====================================================================
 # SYNC CONTROLS
 # =====================================================================
-SYNC_PROJECTS = False   # Set to False to skip project ingestion
+SYNC_PROJECTS = True   # Set to False to skip project ingestion
 SYNC_PROFILES = True  # Set to False to skip profile ingestion
 
 # =====================================================================
@@ -65,7 +65,9 @@ SYNC_CONFIG = {
 # ---------------------------------------------------------------------
 for key, value in SYNC_CONFIG.items():
     if value:
-        os.environ[key] = value
+        # setdefault: a value coming from the real environment / .env
+        # must win — silent overrides at import time are a footgun.
+        os.environ.setdefault(key, value)
 
 # Ensure demo_works root is on sys.path
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

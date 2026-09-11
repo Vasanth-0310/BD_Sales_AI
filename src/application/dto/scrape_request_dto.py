@@ -23,7 +23,6 @@ class JobResultDTO:
     On failure: status=FAILED, error_message is populated.
     """
     status: ScrapeStatus
-    opportunity_id: Optional[str] = None
     job_details: Optional[JobDetails] = None
     company_profile: Optional[CompanyProfile] = None
     auth_required_domain: Optional[str] = None
@@ -32,8 +31,8 @@ class JobResultDTO:
     message: Optional[str] = None
 
     @classmethod
-    def success(cls, job_details: JobDetails, company_profile: CompanyProfile | None = None, opportunity_id: str | None = None) -> "JobResultDTO":
-        return cls(status=ScrapeStatus.SUCCESS, job_details=job_details, company_profile=company_profile, opportunity_id=opportunity_id)
+    def success(cls, job_details: JobDetails, company_profile: CompanyProfile | None = None) -> "JobResultDTO":
+        return cls(status=ScrapeStatus.SUCCESS, job_details=job_details, company_profile=company_profile)
 
     @classmethod
     def auth_required(cls, domain: str, login_url: str | None = None, message: str | None = None) -> "JobResultDTO":

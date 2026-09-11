@@ -139,7 +139,10 @@ class MetricsRepository:
         cost_inr = _calculate_cost_inr(model, prompt_tokens, completion_tokens)
 
         async with self._lock:
-            data = _load_metrics()
+            # File I/O is blocking — run it in a worker thread so a slow or
+            # locked metrics file never stalls the event loop (which would
+            # freeze ALL in-flight requests).
+            data = await asyncio.to_thread(_load_metrics)
 
             # ── Update totals ──────────────────────────────────────────────
             data["total"]["api_calls"] += 1
@@ -162,7 +165,7 @@ class MetricsRepository:
                 bucket["estimated_cost_inr"] + cost_inr, 6
             )
 
-            _save_metrics(data)
+            await asyncio.to_thread(_save_metrics, data)
 
         logger.info(
             f"[Metrics] op={operation} | model={model} | "

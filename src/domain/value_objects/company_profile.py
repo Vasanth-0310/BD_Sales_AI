@@ -1,4 +1,4 @@
-﻿from typing import Optional
+from typing import Optional
 from pydantic import BaseModel, field_validator
 
 from src.domain.value_objects.location_info import LocationInfo, split_location

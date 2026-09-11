@@ -13,7 +13,6 @@ class IngestProjectDTO:
     techstacks: list[str] = field(default_factory=list)
     description: str = ""
     links: dict[str, str] = field(default_factory=dict)
-    case_study_text: str = ""                # Extracted from docx or pdf
 
 
 @dataclass

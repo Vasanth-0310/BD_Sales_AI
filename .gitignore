@@ -86,3 +86,13 @@ scratch/
 # Scraper Debug Logs
 .debug_scrapes/
 
+# runtime artifacts
+qdrant_backups/
+data/
+src/data/
+case_studies/*
+!case_studies/.gitkeep
+!case_studies/README.md
+
+# scripts with live credentials (NEVER commit)
+scripts/check_platform_login.py

@@ -1,3 +1,4 @@
+import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.domain.entities.user_session import UserSession
 from src.domain.interfaces.session_store.i_session_store import ISessionStore
@@ -65,7 +66,18 @@ class SessionRefreshScheduler:
 
         for session in sessions:
             try:
-                await self._refresh_single_session(session)
+                # Hard per-session deadline: a hung CDP call or a stuck website
+                # would otherwise block this coroutine forever, and with
+                # max_instances=1 APScheduler would then skip EVERY future
+                # refresh cycle ("maximum number of running instances reached").
+                await asyncio.wait_for(
+                    self._refresh_single_session(session), timeout=120.0
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"Session refresh TIMED OUT (120s) for user '{session.user_id}' "
+                    f"on '{session.website}' — skipping."
+                )
             except Exception as e:
                 logger.error(
                     f"Error refreshing session for user '{session.user_id}' "
@@ -149,8 +161,13 @@ class SessionRefreshScheduler:
             if browser is None:
                 logger.info("Shared pool busy or unavailable — using standalone browser for refresh.")
             if browser is None:
+                # skip_orphan_kill=True: the session's profile dir may be owned
+                # by a live NodriverPool warm Chrome — a cold launch's orphan
+                # sweep would taskkill it and crash concurrent user scrapes.
                 browser = await BrowserFactory.launch_browser(
-                    headless=settings.browser_cloak_headless, storage_state=session.storage_state
+                    headless=settings.browser_cloak_headless,
+                    storage_state=session.storage_state,
+                    skip_orphan_kill=True,
                 )
         try:
             url = f"https://{session.website}"

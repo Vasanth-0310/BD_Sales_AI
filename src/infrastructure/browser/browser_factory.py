@@ -38,25 +38,6 @@ class BrowserFactory:
     """
 
     @staticmethod
-    def get_browser() -> IBrowser:
-        """
-        Return an uninitialized IBrowser instance for the primary engine.
-
-        Prefer `launch_browser()` for automatic engine fallback at launch time.
-
-        Raises:
-            BrowserLaunchFailedException: If the primary engine cannot be constructed.
-        """
-        try:
-            adapter = _ENGINE_CHAIN[0]()
-            logger.info(f"BrowserFactory: primary engine is {type(adapter).__name__}.")
-            return adapter
-        except Exception as e:
-            raise BrowserLaunchFailedException(
-                reason=f"Primary browser engine failed to initialize: {e}"
-            ) from e
-
-    @staticmethod
     async def launch_browser(
         headless: bool = True,
         storage_state: dict | None = None,

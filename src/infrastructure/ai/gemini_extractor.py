@@ -52,6 +52,7 @@ Rules for extraction:
     - 'state': the state/province/region only (e.g. "Karnataka"). null if not stated.
     - 'country': the country only (e.g. "India"). null if not stated.
     DECOMPOSITION RULE: when 'raw' contains comma-separated place names, you MUST decompose them into city/state/country (e.g. "Chennai, Tamilnadu, 600091 IN" → city="Chennai", state="Tamilnadu", country="IN"). A component stays null ONLY when raw genuinely contains no such component. For work-mode values like "Remote", "Hybrid" or "Work from home", set 'raw' only and leave city/state/country null. Postal codes are never city, state or country.
+    WORLD-KNOWLEDGE RESOLUTION (geography ONLY — the one exception to "do not guess"): a STATED major city may be resolved to its country/state using unambiguous world knowledge — e.g. "Bengaluru" → country="India" (and state="Karnataka"), "Mumbai" → country="India", "Chicago" → country="USA". The city itself is always stated in the text. However, if a place name is ambiguous or obscure (two cities share the name, or you are not certain of the mapping), leave state/country null — wrong geography is worse than null geography. This resolution applies ONLY to location fields; never use world knowledge to fill any other field.
 8. 'employment_type': The employment arrangement if explicitly stated (e.g. "Contract", "Full-time", "Part-time", "Hourly", "Freelance"). Return null if not mentioned.
 9. 'duration': The project or contract length if mentioned (e.g. "3 to 6 months", "12 months", "ongoing"). Return null if not mentioned.
 10. 'level': The seniority level. Must be exactly one of: JUNIOR, INTERMEDIATE, SENIOR, EXPERT, or LEAD. Infer from experience requirements, salary, or title if not explicitly stated.
@@ -69,10 +70,19 @@ Rules for extraction:
     - Sanity check before outputting: a job posting older than ~3 months is
       implausible; if your computed date is older than 3 months before the
       Current UTC time, output null instead.
+    - FLOOR-QUANTIFIER RULE: when the page shows a floor range like "3+ weeks
+      ago", "4+ weeks ago", "30+ days ago" or "2+ months ago" (an exact date
+      is NOT derivable from it), compute the EARLIEST bound — Current UTC
+      minus the floor value (floor × 7 days for weeks, floor numbered days,
+      floor × 30 days for months) — and output it AS "Approximately <date>"
+      (e.g. "3+ weeks ago" today → "Approximately August 21, 2026"). The
+      displayed date is the most recent date still compatible with the range.
+      The 3-month cap still applies to the computed floor (a "4+ months ago"
+      floor exceeds it → null).
     Worked example: the page shows no "Posted X ago" text and no literal posting
     date anywhere → the ONLY correct output is "posted_at": null.
-12. 'required_skills': Extract the must-have, expected, or mandatory technical skills (languages, frameworks, libraries, databases, clouds, tools). If a specific skills section or tech stack is mentioned (even under broad headers like 'What we're looking for', 'What you'll do', 'Skills', 'Requirements', or 'Tech Stack'), extract those as required skills. e.g. ['React Native', 'REST APIs', 'PostgreSQL', 'Java', 'Python']. Do not invent or generalize skills.
-13. 'preferred_skills': Extract technical skills that are explicitly mentioned as nice-to-have, optional, bonus, or preferred (e.g. 'Preferred', 'Nice to have', 'Bonus', 'Plus', 'Advantage'). If the job description does not clearly separate preferred/optional skills from the main expected skills, put all technical skills in 'required_skills' and leave 'preferred_skills' as an empty list [].
+12. 'required_skills': Extract ONLY the must-have, expected, or mandatory technical skills (languages, frameworks, libraries, databases, clouds, tools). If a specific skills section or tech stack is mentioned (even under broad headers like 'What we're looking for', 'What you'll do', 'Skills', 'Requirements', or 'Tech Stack'), extract those as required skills. e.g. ['React Native', 'REST APIs', 'PostgreSQL', 'Java', 'Python']. Do not invent or generalize skills. IMPORTANT: If a skill is qualified with words like 'desirable', 'familiarity', 'a plus', 'preferred', 'nice to have', 'bonus', 'advantage', or 'optional', it is NOT required — put it in 'preferred_skills' instead.
+13. 'preferred_skills': Extract technical skills that are explicitly mentioned as nice-to-have, optional, bonus, preferred, desirable, or "a plus" (e.g. 'Preferred', 'Nice to have', 'Bonus', 'Plus', 'Advantage', 'Desirable', 'Familiarity with X is a plus', 'Experience in X is desirable'). If the job description does not clearly separate preferred/optional skills from the main expected skills, put all technical skills in 'required_skills' and leave 'preferred_skills' as an empty list [].
 14. 'benefits': Extract any perk, healthcare, 401k, remote flexibility, or compensation benefit mentioned.
 15. 'experience': Extract required years of experience if mentioned (e.g. '5+ years', '3-5 years').
 16. 'salary_info': Extract compensation ONLY if numerical figures or exact amounts are mentioned. Do NOT extract vague terms like "Competitive salary", "Negotiable", or "DOE". NEVER mix freelance/engagement metadata (project type, connects required, client activity, payment status) into salary fields.
@@ -101,7 +111,7 @@ Rules for extraction:
 
 FINAL SELF-CHECK BEFORE RESPONDING (mandatory):
 - 'title': if the first line(s) of the text are the viewer's own account/agency/organization name or platform chrome, the title MUST be the job headline that FOLLOWS them — never the chrome itself.
-- 'posted_at': if the page contains NO explicit posting indicator ("Posted X ago" or a literal posting date), it MUST be null. A fabricated date = invalid response.
+- 'posted_at': if the page contains NO explicit posting indicator ("Posted X ago", a floor-quantifier ("3+ weeks ago") or a literal posting date), it MUST be null. A fabricated date = invalid response. Floor-quantifiers are resolved via the FLOOR-QUANTIFIER RULE above, prefixed "Approximately ".
 - If you are not ≥95% certain a value appears in the source text, return null for that field.
 - Never fabricate dates, names, emails, phone numbers, or salary figures. An honest null is always correct; an invented value is always wrong."""
 
@@ -299,7 +309,7 @@ def _validate_salary(job_details: "JobDetails") -> "JobDetails":
     period = normalize_pay_period(raw)
 
     # ── Magnitude sanity: an hourly rate is never 4 figures ───────────
-    if period == "Hourly" and max(amounts) >= 200:
+    if period == "Hourly" and max(amounts) >= (2000 if currency == "INR" else 200):
         period = "Yearly"
 
     info = {

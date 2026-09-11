@@ -34,10 +34,6 @@ class UserSession:
         self.status = SessionStatus.EXPIRED
         self.updated_at = datetime.utcnow()
 
-    def mark_invalid(self) -> None:
-        self.status = SessionStatus.INVALID
-        self.updated_at = datetime.utcnow()
-
     def update_state(self, storage_state: dict[str, Any]) -> None:
         # A Playwright capture (pool refresh) has no profile path; without
         # preserving it, one pool-based refresh would silently erase the

@@ -1,10 +1,10 @@
-﻿"""Pydantic schemas for the Technical Preparation API endpoints."""
+"""Pydantic schemas for the Technical Preparation API endpoints."""
 
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator
 
 
-# â”€â”€â”€ Request Schemas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+#  Request Schemas 
 
 class CandidateInputSchema(BaseModel):
     """A single candidate's input in a batch tech prep request."""
@@ -56,14 +56,14 @@ class TechnicalPrepRequest(BaseModel):
     payload: TechnicalPrepPayloadSchema
 
 
-# â”€â”€â”€ Response Schemas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+#  Response Schemas 
 
 class InterviewTopicSchema(BaseModel):
     """A single topic in the interview preparation guide."""
     topic: str = Field(..., description="Title of the preparation topic.")
     focus: str = Field(
         ...,
-        description="'weakness' â€” candidate needs to learn/prepare this skill.",
+        description="'weakness'  candidate needs to learn/prepare this skill.",
     )
     questions: list[str] = Field(
         ...,

@@ -37,21 +37,6 @@ class IBrowser(ABC):
         ...
 
     @abstractmethod
-    async def fill_field(self, selector: str, value: str) -> None:
-        """Type a value into an input field identified by selector."""
-        ...
-
-    @abstractmethod
-    async def click_element(self, selector: str) -> None:
-        """Click an element identified by selector."""
-        ...
-
-    @abstractmethod
-    async def wait_for_url_change(self, from_url: str, timeout_ms: int = 30000) -> None:
-        """Wait until the current URL is different from from_url (i.e. navigation happened)."""
-        ...
-
-    @abstractmethod
     async def close(self) -> None:
         """Close the browser and release all resources."""
         ...

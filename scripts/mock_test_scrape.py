@@ -49,7 +49,6 @@ class FakeSessionManager:
 
 class FakeSession:
     def __init__(self):
-        from src.domain.entities.user_session import UserSession
         self.user_id = "default_user"
         self.website = "example.com"
         self.storage_state = {}
@@ -78,7 +77,7 @@ class FakeExtractor:
 
 
 class FakeProfiler:
-    async def profile(self, company):
+    async def profile(self, company_name, page_location=None, page_industry=None, page_company_context=None):
         return None
 
 
@@ -155,16 +154,6 @@ async def main():
     check("status SUCCESS despite Mongo outage", r2.status == ScrapeStatus.SUCCESS, r2.status)
 
     print("== T3: dead link (browser path 404) -> FAILED not AUTH_REQUIRED ==")
-    results = {}
-
-    class DeadBrowser(FakeBrowser):
-        async def navigate(self, url, wait_for_job_details=True):
-            return 404
-
-        async def get_page_content(self):
-            # CF error page: used to be misread as a challenge
-            return ("<!DOCTYPE html><html><head><title>Attention Required</title></head>"
-                    "<body>cloudflare Ray ID: 8abc something went wrong</body></html>")
 
     async def fake_fetch_via_browsers(self, **kw):
         return "DEAD_LINK", {"status_code": 404}
