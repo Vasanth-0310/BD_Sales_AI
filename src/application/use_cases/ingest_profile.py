@@ -11,6 +11,7 @@ from src.application.dto.profile_dto import (
 )
 from src.common.logger import get_logger
 from src.infrastructure.backup_service import BackupService
+from src.common.jd_text import truncate_text
 
 
 logger = get_logger(__name__)
@@ -219,7 +220,8 @@ class IngestProfileUseCase:
                 p_tech = ", ".join(p.tech_stack) if p.tech_stack else ""
                 domain_str = f" in the {p.domain} domain" if p.domain else ""
                 project_parts.append(
-                    f"{p.project_name}{domain_str} using {p_tech}: {p.description}"
+                    f"{p.project_name}{domain_str} using {p_tech}: "
+                    f"{truncate_text(p.description, 800)}"
                 )
             parts.append(
                 "Project experience includes " + "; ".join(project_parts) + "."
@@ -231,7 +233,10 @@ class IngestProfileUseCase:
                 "Certifications: " + "; ".join(variant_dto.certifications) + "."
             )
 
-        return " ".join(parts)
+        # The embedding provider has an 8,000-character input ceiling.  Keep
+        # title and stack first, then bounded project evidence, rather than
+        # silently truncating an arbitrary tail inside the adapter.
+        return truncate_text(" ".join(parts), 7_500)
 
     @staticmethod
     def _build_combined_text(variant_dto) -> str:

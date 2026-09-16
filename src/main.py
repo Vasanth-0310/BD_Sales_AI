@@ -100,6 +100,9 @@ async def lifespan(app: FastAPI):
 
         # 2. Qdrant vector store — opens persistent async connection
         app.state.vector_store = QdrantVectorStoreAdapter()
+        # Index creation is idempotent and metadata-only; it never deletes or
+        # re-embeds points.
+        await app.state.vector_store.ensure_search_indexes()
 
         # 3. Gemini embedding (inner) + MongoDB-cached wrapper
         _inner_embedding = GeminiEmbeddingAdapter()

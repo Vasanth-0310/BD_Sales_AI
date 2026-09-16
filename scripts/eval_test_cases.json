@@ -1,0 +1,42 @@
+﻿[
+  {
+    "pipeline": "profile_match",
+    "name": "React Frontend Developer",
+    "job_details": "{\"title\": \"Senior Frontend Developer\", \"role\": \"Frontend\", \"level\": \"Senior\", \"experience\": \"3+ years\", \"required_skills\": [\"React Js\", \"TypeScript\", \"Tailwind CSS\", \"Redux\", \"MUI\"], \"preferred_skills\": [\"GraphQL\", \"Jest\", \"Next.js\"], \"description\": \"We are looking for an experienced Senior Frontend Developer proficient in React.js and TypeScript with strong knowledge of state management using Redux and modern CSS frameworks like Tailwind CSS and MUI.\"}"
+  },
+  {
+    "pipeline": "profile_match",
+    "name": "Java Backend Developer",
+    "job_details": "{\"title\": \"Backend Java Developer\", \"role\": \"Backend\", \"level\": \"Mid\", \"experience\": \"2+ years\", \"required_skills\": [\"Java\", \"Spring Boot\", \"Microservices\", \"PostgreSQL\", \"REST APIs\"], \"preferred_skills\": [\"Docker\", \"JWT\", \"AWS\"], \"description\": \"Seeking a backend Java developer with solid expertise in Spring Boot, RESTful APIs, and microservices architecture. Must have experience with relational databases.\"}"
+  },
+  {
+    "pipeline": "profile_match",
+    "name": "QA Automation Engineer",
+    "job_details": "{\"title\": \"QA Automation Engineer\", \"role\": \"QA\", \"level\": \"Mid\", \"experience\": \"3+ years\", \"required_skills\": [\"Playwright\", \"QA Automation\", \"Regression\", \"BDD\", \"Cucumber\"], \"preferred_skills\": [\"JavaScript\", \"Manual Testing\", \"Jira\"], \"description\": \"We need a QA Automation Engineer experienced with Playwright, BDD frameworks like Cucumber, and test automation pipeline setup. Manual testing skills are a plus.\"}"
+  },
+  {
+    "pipeline": "profile_match",
+    "name": "Python FastAPI Developer",
+    "job_details": "{\"title\": \"Python Backend Developer\", \"role\": \"Backend\", \"level\": \"Mid\", \"experience\": \"3+ years\", \"required_skills\": [\"Python\", \"FastAPI\", \"Next.js\", \"Git\", \"React Js\"], \"preferred_skills\": [\"MongoDB\", \"Docker\", \"PostgreSQL\"], \"description\": \"Looking for a Python developer with hands-on experience in FastAPI for building high-performance APIs, combined with frontend skills in React or Next.js.\"}"
+  },
+  {
+    "pipeline": "project_match",
+    "name": "Digital Health Platform",
+    "job_details": "{\"title\": \"Digital Health Insurance Platform\", \"domain\": \"Healthcare\", \"industry\": \"HealthTech\", \"experience\": \"3+ years\", \"required_skills\": [\"React Js\", \"Spring Boot\", \"AWS\", \"MongoDB\", \"Microservices\"], \"description\": \"We need a team experienced in building digital health platforms with React frontend, Java Spring Boot backend, AWS cloud deployment, and microservices architecture.\"}"
+  },
+  {
+    "pipeline": "project_match",
+    "name": "Real-time Communication Platform",
+    "job_details": "{\"title\": \"Real-time Collaboration Tool\", \"domain\": \"Communication\", \"industry\": \"SaaS\", \"experience\": \"2+ years\", \"required_skills\": [\"WebRTC\", \"Socket.IO\", \"React Js\", \"Node JS\", \"TypeScript\"], \"description\": \"Looking for experience in real-time communication applications using WebRTC, Socket.IO and modern JavaScript frameworks. WebSocket experience is important.\"}"
+  },
+  {
+    "pipeline": "project_match",
+    "name": "Transportation Management System",
+    "job_details": "{\"title\": \"Transport & Logistics Platform\", \"domain\": \"Transportation\", \"industry\": \"Logistics\", \"experience\": \"3+ years\", \"required_skills\": [\"Next.js\", \"PostgreSQL\", \"TypeScript\", \"Node JS\", \"Docker\"], \"description\": \"We are looking for experience in transportation and rail management systems built with modern full-stack technologies including Next.js, TypeScript and PostgreSQL.\"}"
+  },
+  {
+    "pipeline": "project_match",
+    "name": "E-commerce Payment Platform",
+    "job_details": "{\"title\": \"E-Commerce Payment Integration\", \"domain\": \"FinTech\", \"industry\": \"E-Commerce\", \"experience\": \"2+ years\", \"required_skills\": [\"Stripe\", \"React Js\", \"Redux\", \"Firebase\", \"REST APIs\"], \"description\": \"Need experience integrating payment gateways (particularly Stripe), building e-commerce frontends with React, and Firebase backend services.\"}"
+  }
+]

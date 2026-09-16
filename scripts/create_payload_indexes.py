@@ -29,6 +29,7 @@ client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key o
 PLAN: dict[str, list[tuple[str, models.PayloadSchemaType]]] = {
     settings.qdrant_summary_collection: [
         ("user_id", models.PayloadSchemaType.KEYWORD),
+        ("workspace_id", models.PayloadSchemaType.KEYWORD),
         ("project_id", models.PayloadSchemaType.KEYWORD),
         ("description", models.PayloadSchemaType.TEXT),
         ("project_name", models.PayloadSchemaType.TEXT),
@@ -37,10 +38,12 @@ PLAN: dict[str, list[tuple[str, models.PayloadSchemaType]]] = {
     ],
     settings.qdrant_chunks_collection: [
         ("user_id", models.PayloadSchemaType.KEYWORD),
+        ("workspace_id", models.PayloadSchemaType.KEYWORD),
         ("project_id", models.PayloadSchemaType.KEYWORD),
     ],
     settings.qdrant_profile_variants_collection: [
         ("user_id", models.PayloadSchemaType.KEYWORD),
+        ("workspace_id", models.PayloadSchemaType.KEYWORD),
         ("candidate_id", models.PayloadSchemaType.KEYWORD),
         ("combined_text", models.PayloadSchemaType.TEXT),
         ("variant_title", models.PayloadSchemaType.TEXT),

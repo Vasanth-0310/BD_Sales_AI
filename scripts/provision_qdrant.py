@@ -60,15 +60,15 @@ def provision(client: QdrantClient, recreate: bool) -> None:
     collections_spec = {
         settings.qdrant_summary_collection: {
             "text": ["description", "project_name", "domain", "techstacks"],
-            "keyword": ["project_id", "user_id"],
+            "keyword": ["project_id", "user_id", "workspace_id"],
         },
         settings.qdrant_chunks_collection: {
             "text": [],
-            "keyword": ["project_id", "user_id"],
+            "keyword": ["project_id", "user_id", "workspace_id"],
         },
         settings.qdrant_profile_variants_collection: {
             "text": ["combined_text", "variant_title", "tech_stacks_text"],
-            "keyword": ["candidate_id", "user_id"],
+            "keyword": ["candidate_id", "user_id", "workspace_id"],
         },
     }
 
@@ -121,10 +121,11 @@ def _ensure_indices(client: QdrantClient, name: str, indices: dict, friendly: di
     """Create any missing payload indices; skip ones already present."""
     try:
         info = client.get_collection(name)
+        # Qdrant returns payload_schema as {field_name: index_info}; the
+        # field name is the dictionary key, not an attribute on index_info.
         existing_fields = {
-            i.field_name: i.data_type
-            for i in (info.payload_schema or {}).values()
-            if hasattr(i, "field_name") and hasattr(i, "data_type")
+            field_name: index_info.data_type
+            for field_name, index_info in (info.payload_schema or {}).items()
         }
     except Exception as e:
         logger.warning(

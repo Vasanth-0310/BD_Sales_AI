@@ -25,8 +25,14 @@ _STOPWORDS = {
     "questions", "proposal", "null", "none", "remote", "full", "time",
 }
 
-_SHORT_TECH_TERMS = {"ai", "ml", "qa", "ui", "ux", "go", "c", "r"}
-_TOKEN_RE = re.compile(r"(?:\.NET|[A-Za-z][A-Za-z0-9+#.]*)")
+_SHORT_TECH_TERMS = {
+    "ai", "ml", "qa", "ui", "ux", "go", "c", "r",
+    "c#", "f#", "js", "ts", "ci", "cd",
+}
+_TOKEN_RE = re.compile(
+    r"(?:\.[A-Za-z][A-Za-z0-9]*|[A-Za-z][A-Za-z0-9+#.]*)",
+    re.IGNORECASE,
+)
 
 
 def extract_jd_keywords(jd_text: str, max_keywords: int = 40) -> str:
@@ -40,7 +46,9 @@ def extract_jd_keywords(jd_text: str, max_keywords: int = 40) -> str:
     seen: set[str] = set()
     for part in source_parts:
         for token in _TOKEN_RE.findall(str(part)):
-            normalized = token.strip(".,;:()[]{}'\"").strip()
+            # Preserve leading dots in technologies such as .NET while
+            # removing ordinary surrounding punctuation.
+            normalized = token.strip(",;:()[]{}'\"").strip()
             if not normalized:
                 continue
 
@@ -58,6 +66,43 @@ def extract_jd_keywords(jd_text: str, max_keywords: int = 40) -> str:
                 return " ".join(keywords)
 
     return " ".join(keywords)
+
+
+def build_retrieval_query(jd_text: str) -> str:
+    """Build a compact, importance-aware query for embeddings and BM25.
+
+    Retrieval must not be driven by a raw JSON request where company, city and
+    a long preferred-skill tail carry the same weight as the central stack.
+    Repeating explicit required skills gives lexical and embedding retrieval a
+    deterministic signal without inventing requirements.  Final critical vs
+    supporting judgement still happens evidence-first in the synthesizer.
+    """
+    data = _parse_json_object(jd_text)
+    if not data:
+        return truncate_text(jd_text, 6000)
+
+    parts: list[str] = []
+    for key in ("title", "role", "domain", "industry", "experience", "level"):
+        value = data.get(key)
+        if value:
+            parts.append(str(value))
+
+    required = _as_text_list(data.get("required_skills") or data.get("skills"))
+    preferred = _as_text_list(data.get("preferred_skills"))
+    # Required terms appear three times, preferred terms once.  This affects
+    # recall only; it is never presented as fabricated candidate evidence.
+    parts.extend(required * 3)
+    parts.extend(preferred)
+
+    for key in (
+        "description", "job_description", "responsibilities", "requirements",
+        "qualifications", "duties",
+    ):
+        value = data.get(key)
+        if value:
+            parts.append(truncate_text(value, 1400))
+
+    return truncate_text(" ".join(parts), 6000)
 
 
 def compact_job_details(jd_text: str, summary_chars: int = 700) -> str:
@@ -78,6 +123,14 @@ def compact_job_details(jd_text: str, summary_chars: int = 700) -> str:
         "experience",
         "domain",
         "industry",
+        # Preserve source sections used to classify critical versus supporting
+        # requirements. Scoring must not rely on an incomplete skill list.
+        "description",
+        "job_description",
+        "responsibilities",
+        "requirements",
+        "qualifications",
+        "duties",
         # BD personalization hooks: the cold email/discovery questions can
         # address the client's company, region (timezone overlap) and
         # engagement duration — strong outsourcing-pitch signals.
@@ -93,8 +146,16 @@ def compact_job_details(jd_text: str, summary_chars: int = 700) -> str:
         value = data.get(key)
         if value in (None, "", [], {}):
             continue
-        if key == "ai_job_summary":
-            value = truncate_text(value, summary_chars)
+        if key in {
+            "description",
+            "job_description",
+            "responsibilities",
+            "requirements",
+            "qualifications",
+            "duties",
+            "ai_job_summary",
+        }:
+            value = truncate_text(value, 1200 if key != "ai_job_summary" else summary_chars)
         compact[key] = value
 
     return json.dumps(compact, ensure_ascii=True)
@@ -113,7 +174,9 @@ def _structured_keyword_sources(jd_text: str) -> list[str]:
         return []
 
     parts: list[str] = []
-    for key in ("required_skills", "preferred_skills", "skills", "tech_stacks"):
+    # Preserve source order: required skills are emitted before preferred
+    # terms, so the keyword cap cannot crowd core requirements out.
+    for key in ("required_skills", "skills", "tech_stacks", "preferred_skills"):
         value = data.get(key)
         if isinstance(value, list):
             parts.extend(str(item) for item in value if item)
@@ -121,6 +184,16 @@ def _structured_keyword_sources(jd_text: str) -> list[str]:
             parts.append(str(value))
 
     for key in ("title", "role", "domain", "industry", "level"):
+        value = data.get(key)
+        if value:
+            parts.append(str(value))
+
+    # Structured skill arrays are occasionally incomplete.  Include original
+    # duty text in keyword recall as well as in the later LLM prompt.
+    for key in (
+        "description", "job_description", "responsibilities", "requirements",
+        "qualifications", "duties",
+    ):
         value = data.get(key)
         if value:
             parts.append(str(value))
@@ -138,3 +211,9 @@ def _parse_json_object(text: str) -> dict[str, Any]:
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _as_text_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    return [str(value)] if value else []

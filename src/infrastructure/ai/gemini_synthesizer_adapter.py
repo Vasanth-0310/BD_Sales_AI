@@ -14,10 +14,11 @@ from collections import defaultdict
 
 from google import genai
 from google.genai import types
+from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.common.config import settings
-from src.common.jd_text import compact_job_details, truncate_text
+from src.common.jd_text import compact_job_details, extract_jd_keywords, truncate_text
 from src.common.logger import get_logger
 from src.domain.exceptions.rag_exceptions import SynthesisError
 from src.domain.interfaces.rag.i_synthesizer_port import ISynthesizerPort
@@ -36,94 +37,147 @@ from src.infrastructure.metrics.metrics_repository import MetricsRepository
 
 logger = get_logger(__name__)
 
+# A full profile pool can contain 30 candidates. One structured JSON response
+# for all of them can exceed the model output ceiling and be truncated midway
+# through a string. Score every candidate, but in complete bounded batches.
+_PROFILE_MATCH_BATCH_SIZE = 10
+
+
+class ProfileMatchLLMResult(BaseModel):
+    """Private Gemini contract; public API output remains unchanged."""
+
+    candidate_id: str
+    candidate_name: str
+    variant_id: str
+    variant_title: str
+    experience_years: int = 0
+    match_percentage: float = 0
+    matching_skills: list[str] = Field(default_factory=list)
+    missing_skills: list[str] = Field(default_factory=list)
+    justification: str = ""
+    # Job-first inventory fields.  These are consumed and verified internally,
+    # never exposed by the existing API response schema.
+    critical_requirements: list[str] = Field(default_factory=list)
+    supporting_requirements: list[str] = Field(default_factory=list)
+    preferred_requirements: list[str] = Field(default_factory=list)
+    domain_score: float = Field(default=0, ge=0, le=15)
+
+
+class ProfileRequirementInventory(BaseModel):
+    """One validated JD requirement allocation, shared by every batch."""
+
+    critical_requirements: list[str] = Field(default_factory=list)
+    supporting_requirements: list[str] = Field(default_factory=list)
+    preferred_requirements: list[str] = Field(default_factory=list)
+
+
+class ProjectMatchLLMResult(BaseModel):
+    """Private project-score contract; public response schema is unchanged."""
+
+    project_id: str
+    project_name: str
+    match_score: float = 0
+    justification: str = ""
+    matched_evidence: list[str] = Field(default_factory=list)
+    technical_score: float = Field(default=0, ge=0, le=60)
+    domain_score: float = Field(default=0, ge=0, le=20)
+    evidence_quality_score: float = Field(default=0, ge=0, le=20)
+
 # ------------------------------------------------------------------ #
 # System prompt for the Gemini synthesis call
 # ------------------------------------------------------------------ #
-_SYSTEM_INSTRUCTION = """\
-You are an expert technical recruiter AI.  Your task is to evaluate a
-company's past projects against a new job opportunity and determine which
-projects are the most relevant.
 
-You will receive:
-1. A plain text string describing the job opportunity (title, required skills,
-   description, etc.).
-2. Evidence chunks grouped by project.  Each group contains the
-   project_name, domain, tech stacks, and the actual text chunks that
-   were retrieved as evidence of relevance.
+# The project matcher must make the same distinction as profile matching:
+# core requirements matter more than incidental keyword overlap. This active
+# contract also makes evidence provenance enforceable by the parser below.
+_PROJECT_SYSTEM_INSTRUCTION = """\
+You are an evidence-first technical recruiter AI selecting the most relevant
+past projects for a supplied job description (JD). Accuracy and non-fabrication
+are more important than returning a high score.
 
-Your output MUST be a JSON array of objects, each with:
-- project_id        (str)        — the project UUID
-- project_name      (str)        — the project name
-- match_score       (float)      — relevance score between 0.0 and 1.0,
-                                   computed EXACTLY per the rubric below
-- justification     (str)        — concise explanation including the arithmetic
-                                   AND the per-skill evidence mapping (see
-                                   step 6 below)
-- matched_evidence  (list[str])  — the chunk texts you found most relevant
+The input contains one JD and evidence grouped by project. Each project has a
+project_id, project_name, domain, tech stacks, and retrieved evidence chunks.
+Use only the supplied JD and that project's supplied evidence. Never use
+outside knowledge, another project's evidence, retrieval rank, project order,
+project-name familiarity, or profile verbosity as evidence.
 
-SCORING RUBRIC — compute the score from these weighted factors, NOT gut feel.
-YOU MUST follow the COMPUTATION recipe exactly, in order:
+JOB-FIRST ANALYSIS (do this once for all projects)
+1. Read the complete JD, including description, responsibilities,
+   qualifications, required_skills, preferred_skills, domain, industry,
+   experience, and level. Treat ai_job_summary as context only: it must not
+   create a requirement absent from explicit JD text or structured fields.
+2. Build one fixed requirement inventory before reviewing projects:
+   - CRITICAL: competencies essential to the JD's central work, normally the
+     2-5 skills repeatedly emphasized or required by core duties.
+   - SUPPORTING: useful requirements that support the role but are not core.
+   - PREFERRED: explicitly optional, desirable, bonus, plus, or nice-to-have.
+   Do not make a skill critical merely because it appears in a list, and do not
+   treat a soft skill as technical unless the JD makes it central.
+3. Record the JD's explicit domain and industry. If absent, treat it as
+   unspecified; do not invent one. Apply the same inventory to every project.
 
-1. SKILL MATCHING IS SEMANTIC, NOT LITERAL. Treat skill names as the same
-   skill when they refer to the same technology regardless of surface form:
-   "React" = "React.js" = "ReactJS", "REST APIs" = "RESTful Web APIs",
-   "SQL Server" ⊃ "SQL", "K8s" = "Kubernetes", "Golang" = "Go",
-   "Postgres" = "PostgreSQL", "JS" = "JavaScript", "Node.js" = "Node",
-   "ML" = "Machine Learning". A JD skill counts as MATCHED when the same
-   technology appears in this project's evidence chunks or tech stacks — even
-   under a different surface form. A merely-RELATED skill is NOT a match
-   ("React Native" ≠ "React", "testing" ⇏ "unit testing"). Never invent a
-   match for a skill that has no supporting chunk.
+EVIDENCE-ONLY MATCHING (anti-hallucination rules)
+- A JD skill matches only when that project's tech stacks or evidence chunks
+  explicitly show the skill or a defensible direct equivalent. Project domain
+  alone does not prove a skill.
+- Semantic matching is allowed only for same technology/direct equivalents,
+  such as React/React.js/ReactJS, REST APIs/RESTful Web APIs,
+  Selenium WebDriver/Selenium, Node.js/Node, K8s/Kubernetes, Golang/Go,
+  Postgres/PostgreSQL, and JS/JavaScript when unambiguous.
+- Related is not equivalent: React Native is not React; testing is not
+  automatically unit testing; SQL is not automatically PostgreSQL
+  administration. When uncertain, mark the skill not evidenced.
+- An evidence chunk supports a claim only when its text actually states the
+  technology, work, outcome, or domain. Never infer architecture, scale,
+  outcomes, or domain from a technology name.
+- matched_evidence MUST contain only exact, verbatim strings copied from the
+  supplied Evidence Chunks for that same project. Do not paraphrase, shorten,
+  combine, or invent evidence text.
 
-2. REQUIRED-SKILL OVERLAP (weight 0.50):
-   Let N_req = number of skills in the JD's required_skills.
-   Let M_req = how many of those appear semantically in this project's
-   evidence chunks. component = M_req ÷ N_req  (0.0–1.0).
+EXACT PROJECT SCORE: TECHNICAL 60 + DOMAIN 20 + EVIDENCE QUALITY 20 = 100
+Technical score (60 points): critical coverage = 45 points, supporting
+coverage = 12 points, preferred coverage = 3 points. Divide each category's
+points equally among its non-empty JD requirements. If a category is empty,
+redistribute its points proportionally to the non-empty categories. A skill
+receives points only when explicitly evidenced or defensibly equivalent;
+partial/unclear evidence receives zero. Never count a JD requirement twice.
 
-3. PREFERRED-SKILL BONUS (weight 0.15):
-   Let N_pref = number of skills in the JD's preferred_skills list (0 if none).
-   component = M_pref ÷ N_pref (semantically matched in the chunks).
-   If the JD has no preferred skills, this component contributes 0.0.
+Domain score (20 points): award points only for explicit evidence that the
+project worked in the same or closely comparable domain and comparable
+business context. Use 20/20 for direct, explicit domain evidence; 10/20 for
+closely adjacent explicit domain evidence; 0/20 when unrelated or not
+evidenced. Do not infer domain from technology names.
 
-4. DOMAIN FIT (weight 0.20) — tiered:
-   1.0 = direct match (project domain / primary industry is the same
-         sector as the JD's industry)
-   0.5 = adjacent (closely related sector, or transfers directly)
-   0.0 = unrelated.
+Evidence quality score (20 points): award 20/20 only when the supplied chunks
+explicitly describe relevant implementation or outcomes; 10/20 when they name
+relevant skills but provide little detail; 0/20 when there is no relevant
+evidence. Do not reward a project for unsupported claims.
 
-5. EVIDENCE QUALITY (weight 0.15) — tiered:
-   1.0 = evidence chunks contain detailed technical descriptions of how this
-         project used the relevant skills (architecture, implementation,
-         stack specifics)
-   0.5 = thin — skills are named but chunks carry little substance
-   0.0 = skill mention only, no supporting detail.
+Compute final match_score = technical_score + domain_score + evidence_quality_score,
+then divide by 100 to produce a float from 0.0 to 1.0. Do not adjust after
+arithmetic for overall impression. Show the component scores, category
+coverage, total, and a per-skill evidence map in the justification.
 
-6. COMPUTATION — the final match_score is the weighted sum:
-   match_score = 0.50 × required_overlap
-               + 0.15 × preferred_bonus
-               + 0.20 × domain_fit
-               + 0.15 × evidence_quality
-   Sample arithmetic: 'Matched 4 of 10 required skills → 0.50×0.40 = 0.20;
-   1 of 2 preferred → 0.15×0.50 = 0.075; domain direct → 0.20; detailed
-   evidence → 0.15; total 0.62.'
+INTERNAL REQUIRED FIELDS (not part of the public API): technical_score (0-60),
+domain_score (0-20), and evidence_quality_score (0-20).  The application
+recomputes match_score from these fields.
 
-7. CONSISTENCY RULE: two projects with the SAME component values MUST receive
-   the same match_score.
+OUTPUT RULES
+- Return only projects represented in the supplied evidence.
+- project_id must be copied exactly from the input.
+- project_name must be copied exactly from the input for that project.
+- justification must name only facts supported by the JD or that project's
+  evidence, and must state when evidence is sparse or a requirement is not
+  evidenced.
+- A score above 0.90 requires nearly all critical skills, explicit comparable
+  domain evidence, and detailed relevant implementation evidence.
+- Projects with identical JD evidence, domain evidence, and evidence quality
+  must receive identical component and final scores. Do not use unrelated
+  metadata as a tie-breaker.
 
-8. JUSTIFICATION must present the arithmetic (the 6-step sample above) AND a
-   per-skill evidence map, written as: 'skill → supporting chunk quote'.
-   Example fragment: 'Python → "implemented in Python microservices";
-   FastAPI → "RESTful endpoints built with FastAPI"; ...'. For each MATCHED
-   JD skill, name the chunk that proves it; the surface form in the chunk may
-   differ from the JD spelling (semantic rule #1). No gut feel, no invented
-   evidence. If a project's evidence is sparse, say so plainly.
-
-Return the TOP 3 most relevant projects, sorted by match_score
-descending.  If fewer than 3 projects exist, return all of them.
-Score EVERY provided project honestly — give genuinely weak matches the low
-score they deserve (the caller filters anything below a relevance threshold).
-If the evidence chunks contradict a project's summary, trust the evidence.
-Be precise and objective — do not inflate scores.
+Return the top 3 relevant projects, sorted by match_score descending. If fewer
+than 3 projects are supplied, return all of them. Score every supplied project
+honestly before selecting the top 3; weak or unrelated projects may score 0.0.
 """
 
 # ------------------------------------------------------------------ #
@@ -209,6 +263,7 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
     def __init__(self, metrics: MetricsRepository | None = None) -> None:
         self._client = genai.Client(api_key=settings.gemini_api_key)
         self._model: str = settings.gemini_model
+        self._fallback_model: str = settings.gemini_fallback_model.strip()
         self._metrics = metrics
         self._disable_thinking = settings.gemini_disable_thinking
         # Brand name comes from settings — never hardcoded in the prompt body.
@@ -241,10 +296,10 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
             except Exception:
                 pass  # SDK doesn't support it — proceed without
 
-        async def _call():
+        async def _call_model(model_name: str):
             try:
                 return await self._client.aio.models.generate_content(
-                    model=self._model, contents=contents, config=config
+                    model=model_name, contents=contents, config=config
                 )
             except Exception as e:
                 if "thinking" in str(e).lower() and self._disable_thinking:
@@ -255,9 +310,31 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
                     except Exception:
                         config2 = config
                     return await self._client.aio.models.generate_content(
-                        model=self._model, contents=contents, config=config2
+                        model=model_name, contents=contents, config=config2
                     )
                 raise
+
+        async def _call():
+            try:
+                return await _call_model(self._model)
+            except Exception as exc:
+                message = str(exc).lower()
+                capacity_error = any(
+                    marker in message
+                    for marker in ("503", "unavailable", "429", "resource_exhausted", "rate limit")
+                )
+                if not capacity_error or not self._fallback_model or self._fallback_model == self._model:
+                    raise
+                logger.warning(
+                    "Gemini primary model unavailable; retrying with fallback model=%s",
+                    self._fallback_model,
+                )
+                fallback_response = await _call_model(self._fallback_model)
+                logger.info(
+                    "Gemini synthesis completed with fallback model=%s",
+                    self._fallback_model,
+                )
+                return fallback_response
 
         hedge_delay = settings.gemini_hedge_delay_s
         primary = asyncio.ensure_future(_call())
@@ -337,12 +414,16 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
         Returns:
             A list with duplicate texts removed (first occurrence kept).
         """
-        seen: set[str] = set()
+        # Identical boilerplate can legitimately occur in two different
+        # projects.  De-duplicating by text alone erased the later project's
+        # only evidence before provenance validation.
+        seen: set[tuple[str, str]] = set()
         unique: list[dict] = []
         for chunk in chunk_evidence:
             text = chunk.get("text", "")
-            if text not in seen:
-                seen.add(text)
+            key = (str(chunk.get("project_id", "")), str(text))
+            if key not in seen:
+                seen.add(key)
                 unique.append(chunk)
         return unique
 
@@ -466,11 +547,14 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
             # 4 — Call Gemini
             logger.info("[Synthesizer] [synthesize_projects] Sending to Gemini (model=%s)...", self._model)
             _gemini_start = time.perf_counter()
-            logger.debug(f"Gemini Project Match Input Prompt:\n{user_prompt}")
+            logger.debug(
+                "Gemini project-match prompt prepared  |  jd_chars=%d  projects=%d",
+                len(compact_jd), len(grouped),
+            )
             response = await self._generate_hedged(user_prompt, config=types.GenerateContentConfig(
-                    system_instruction=_SYSTEM_INSTRUCTION,
+                    system_instruction=_PROJECT_SYSTEM_INSTRUCTION,
                     response_mime_type="application/json",
-                    response_schema=list[ProjectMatchResult],
+                    response_schema=list[ProjectMatchLLMResult],
                     temperature=0.1,
                 ),
             )
@@ -487,7 +571,7 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
                     logger.warning("Metrics persist failed (non-fatal): %s", metrics_err)
 
             raw_text = response.text
-            logger.debug(f"Gemini Project Match Raw Output JSON:\n{raw_text}")
+            logger.debug("Gemini project-match response received  |  chars=%d", len(raw_text))
             logger.info(
                 "synthesize  |  raw_response_length=%d",
                 len(raw_text),
@@ -497,13 +581,112 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
             # Deduplicate matched_evidence inside each raw dict BEFORE constructing
             # the frozen ProjectMatchResult — frozen instances cannot be mutated.
             raw_results: list[dict] = json.loads(raw_text)
+
+            # Enforce provenance at the boundary. The model is only allowed to
+            # return projects and evidence that were actually supplied to it;
+            # this prevents fabricated project names, IDs, and evidence quotes
+            # from reaching the API response. Evidence is compared against the
+            # exact truncated text shown in the prompt.
+            project_names = {
+                project_id: str(chunks[0].get("project_name", "N/A"))
+                for project_id, chunks in grouped.items()
+                if chunks
+            }
+            allowed_evidence = {
+                project_id: {
+                    truncate_text(chunk.get("text", ""), 700)
+                    for chunk in chunks
+                    if chunk.get("text")
+                }
+                for project_id, chunks in grouped.items()
+            }
+
+            def _verified_evidence(project_id: str, value: object) -> str | None:
+                """Resolve model evidence to the exact supplied chunk text.
+
+                Gemini may include the prompt's ``[n]`` label or quote only a
+                verbatim excerpt. Return the canonical stored chunk so the
+                public result never contains model-invented evidence.
+                """
+                if not isinstance(value, str):
+                    return None
+                candidate = re.sub(r"^\s*\[\d+\]\s*", "", value).strip()
+                if not candidate:
+                    return None
+                for supplied in allowed_evidence.get(project_id, set()):
+                    if candidate == supplied or candidate in supplied or supplied in candidate:
+                        return supplied
+                return None
+
+            verified_results: list[dict] = []
             for item in raw_results:
-                evidence = item.get("matched_evidence") or []  # null-safe
+                project_id = item.get("project_id")
+                if project_id not in project_names:
+                    logger.warning(
+                        "Dropping project-match item with unknown project_id=%s",
+                        project_id,
+                    )
+                    continue
+
+                # ``match_score`` is model output only.  Recompute the public
+                # score from the bounded private component fields below, so a
+                # plausible-looking but unsupported total cannot affect rank.
+                try:
+                    technical_score = float(item.get("technical_score", 0))
+                    domain_score = float(item.get("domain_score", 0))
+                    evidence_quality_score = float(
+                        item.get("evidence_quality_score", 0)
+                    )
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Dropping project-match item with invalid component score | project_id=%s",
+                        project_id,
+                    )
+                    continue
+                if not (
+                    0.0 <= technical_score <= 60.0
+                    and 0.0 <= domain_score <= 20.0
+                    and 0.0 <= evidence_quality_score <= 20.0
+                ):
+                    logger.warning(
+                        "Dropping project-match item with out-of-range component score | project_id=%s",
+                        project_id,
+                    )
+                    continue
+
+                # Canonicalize identity from retrieved data, never from the
+                # model's free-form copy of the project name.
+                item["project_name"] = project_names[project_id]
+                evidence = item.get("matched_evidence") or []
                 seen: set[str] = set()
-                item["matched_evidence"] = [
-                    ev for ev in evidence
-                    if ev not in seen and not seen.add(ev)
-                ]
+                verified_evidence: list[str] = []
+                for ev in evidence:
+                    resolved = _verified_evidence(project_id, ev)
+                    if resolved and resolved not in seen:
+                        seen.add(resolved)
+                        verified_evidence.append(resolved)
+                item["matched_evidence"] = verified_evidence
+                # A non-zero project score without any verifiable chunk
+                # evidence is unsupported. Keep the result shape unchanged,
+                # but make the score safely non-matching.  Otherwise the
+                # model's total is ignored in favour of verified arithmetic.
+                if not item["matched_evidence"]:
+                    item["match_score"] = 0.0
+                else:
+                    item["match_score"] = round(
+                        (technical_score + domain_score + evidence_quality_score) / 100,
+                        4,
+                    )
+                    item["justification"] = (
+                        f"{item.get('justification', '').strip()} "
+                        "Verified score: "
+                        f"technical {technical_score:g}/60, "
+                        f"domain {domain_score:g}/20, "
+                        f"evidence {evidence_quality_score:g}/20."
+                    ).strip()
+                verified_results.append(item)
+
+            raw_results = verified_results
 
             # Salvage: one malformed item from Gemini must not kill the whole
             # match response — drop invalid items and keep the valid ones.
@@ -656,7 +839,11 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
             leak_targets += result.talking_points
             leak_targets += result.discovery_questions
             for name in filter(None, project_names):
-                if len(name) >= 4 and any(name.lower() in t.lower() for t in leak_targets):
+                pattern = re.compile(
+                    rf"(?<!\w){re.escape(name)}(?!\w)",
+                    flags=re.IGNORECASE,
+                )
+                if any(pattern.search(t) for t in leak_targets):
                     logger.warning(
                         "[Synthesizer] Internal project name '%s' leaked into sales "
                         "enablement output — redacting.",
@@ -666,7 +853,6 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
                     # replacement must too — a case-sensitive replace() on
                     # "acmeportal" vs "AcmePortal" redacts 0 characters and
                     # leaks the internal name to the client.
-                    pattern = re.compile(re.escape(name), flags=re.IGNORECASE)
                     result = result.model_copy(update={
                         field: pattern.sub("our recent work", value)
                         for field, value in (
@@ -713,81 +899,154 @@ class GeminiSynthesizerAdapter(ISynthesizerPort):
     # Profile Matching Synthesis
     # ------------------------------------------------------------------
 
+    # The original prompt above is retained in history for easier review;
+    # this assignment is the active profile-matching contract.
     _PROFILE_SYSTEM_INSTRUCTION = """\
-You are an expert technical recruiter AI. Your task is to evaluate candidate
-profile variants against a job description and determine the best matches.
+You are an evidence-first technical recruiter AI. Evaluate candidate variants
+against the supplied job description (JD). Accuracy and non-fabrication are
+more important than producing a high score.
 
-You will receive:
-1. A plain text job description (title, required skills, experience, etc.).
-2. A list of candidate variant profiles. Each variant contains:
-   - candidate_id, candidate_name, variant_id, variant_title
-   - experience_years, tech_stacks, certifications
-   - A list of past projects with project_name, domain, tech_stack, and description
+The input contains a JD and candidate data. For each candidate return the
+requested ProfileMatchResult fields. Use only facts present in that candidate's
+input. Never use outside knowledge, another candidate's data, retrieval rank,
+profile order, candidate name, availability, or profile verbosity as evidence.
 
-For EACH variant, you must produce:
-- candidate_id (str) — the candidate's ID
-- candidate_name (str) — the candidate's name
-- variant_id (str) — the variant ID
-- variant_title (str) — the variant title
-- experience_years (int) — years of experience
-- match_percentage (int) — a score from 0 to 100 representing how well this
-  variant matches the JD. Be precise and objective.
-  SCORING RUBRIC — compute the score from these weighted factors, NOT gut feel.
-  YOU MUST follow the COMPUTATION recipe exactly, in order:
-  1. SKILL MATCHING IS SEMANTIC, NOT LITERAL. Treat skill names as the same
-     skill when they refer to the same technology regardless of surface form:
-     "React" = "React.js" = "ReactJS", "REST APIs" = "RESTful Web APIs",
-     "SQL Server" ⊃ "SQL", "Selenium WebDriver" = "Selenium",
-     "Node.js" = "Node", "K8s" = "Kubernetes", "Golang" = "Go",
-     "Postgres" = "PostgreSQL", "JS" = "JavaScript" (when context is
-     unambiguous). A JD skill counts as MATCHED when the candidate has the
-     same technology under ANY common name, evidenced in their tech_stacks,
-     project tech_stack lists or descriptions. NEVER mark a skill as missing
-     merely because the strings differ; conversely NEVER claim a match for a
-     merely-related-but-different skill (e.g. "react native" ≠ "react",
-     "testing" ⇏ "unit testing" specifically). When genuinely unsure whether
-     the candidate has it, count it as MISSING, never fabricate.
-  2. TECH STACK OVERLAP (~60% of the score — arithmetic anchor):
-     Let N = number of required skills stated in the JD, M = number of them
-     MATCHED semantically as above. Then base_score = M ÷ N × 60.
-     SHOW THE ARITHMETIC in the justification, e.g. (matched 4 of 10 →
-     base 24/60). Two candidates with the SAME M and N MUST get the SAME
-     base score before adjustments.
-  3. DOMAIN/INDUSTRY RELEVANCE (~25%): adjust up/down from the base within
-     ±15 points based on how closely the candidate's project domains match
-     the JD's industry.
-  4. EXPERIENCE LEVEL ALIGNMENT (~15%): LEVELS map to years as
-     JUNIOR=0-2, INTERMEDIATE=3-5, SENIOR=6-9, EXPERT/LEAD=10+.
-     Penalise ONLY when the gap is clear: a candidate with far fewer years
-     than the JD demands, or heavily over-qualified, scores lower — state
-     the gap in the justification. If the JD states NO explicit years AND
-     no level, do NOT penalise on experience at all.
-  5. Project complexity and relevance: fold into the domain adjustment.
-  Present the computation INSIDE the justification, e.g.:
-  'Matched M of N required skills (list them) → base M÷N×60 = X;
-   domain … ±Y; experience … → final Z%'.
-- matching_skills (list[str]) — specific skills from the JD that this candidate HAS
-  (semantically same technology; state the surface form found in the profile)
-- missing_skills (list[str]) — specific skills from the JD that this candidate LACKS
-- justification (str) — a concise 2-3 sentence explanation of the match/mismatch.
-  Reference specific projects or certifications as evidence. If the variant's
-  profile data is sparse, say so plainly — do NOT invent evidence to fill gaps.
+JOB-FIRST ANALYSIS (do this once before reviewing any candidate)
+1. Read the complete supplied JD, including description, responsibilities,
+   qualifications, required_skills, preferred_skills, domain, industry,
+   experience, and level.
+   Treat ai_job_summary as a convenience summary only; it is not authoritative
+   evidence and must never create a requirement that is absent from the JD's
+   explicit text or structured requirement fields.
+2. Create one fixed requirement inventory shared by every candidate:
+   - CRITICAL: essential competencies needed for the role's central work,
+     normally the 2-5 skills repeatedly emphasized or required by core duties.
+   - SUPPORTING: useful technical/professional requirements that support the
+     role but are not its core.
+   - PREFERRED: explicitly optional, desirable, bonus, plus, or nice-to-have.
+   Do not make a skill critical only because it appears in a list. Do not turn
+   a soft skill into a critical technical skill unless the JD makes it central.
+3. Record the JD's explicit domain and explicit experience/seniority target.
+   If either is absent, record it as unspecified; do not invent a target.
+   Keep this classification and allocation identical for all candidates.
+   When the user prompt supplies a `Canonical JD Requirement Inventory`, it
+   has already been validated from this JD. Use it exactly; do not reclassify,
+   add, remove, or move requirements between its categories.
 
-Availability/resource_status is NOT part of the match score — score purely on
-skills, experience and domain fit.
+EVIDENCE-ONLY MATCHING (anti-hallucination rules)
+- A skill is MATCHED only when explicitly evidenced in this candidate's
+  tech_stacks, project tech_stack, project description, certifications, or
+  stated experience. A title, seniority, domain, or adjacent technology is not
+  evidence by itself.
+- Semantic matching is allowed only for a defensible same-technology or direct
+  equivalent, and the profile evidence must be named in the justification.
+  Examples: React/React.js/ReactJS, REST APIs/RESTful Web APIs,
+  Selenium WebDriver/Selenium, Node.js/Node, K8s/Kubernetes, Golang/Go,
+  Postgres/PostgreSQL, and JS/JavaScript when unambiguous.
+- Related is not equivalent: React Native is not React; testing is not
+  automatically unit testing; SQL is not automatically PostgreSQL
+  administration. If uncertain, classify the requirement as NOT EVIDENCED.
+- A project domain alone does not prove a skill. A project description counts
+  only when it explicitly states the relevant work or technology.
+- Missing evidence means "not evidenced", not that the candidate definitely
+  cannot do it. Never invent skills, years, outcomes, certifications,
+  responsibilities, project scale, equivalences, or domain experience.
 
-Return a JSON array sorted by match_percentage descending.
-Be precise and objective — do not inflate scores. A 90%+ match should only be
-given when the candidate has nearly all required skills AND relevant domain experience.
-CONSISTENCY CHECK before responding: if two candidates have identical
-matching_skills and missing_skills lists, they MUST receive the same
-match_percentage — never differentiate candidates by score when their
-skill evidence is identical (mention any other differences in the
-justification instead).
+EXACT SCORE: TECHNICAL 60 + DOMAIN 15 + EXPERIENCE 25 = 100
+Technical score (60 points):
+- CRITICAL coverage: 45 points (75% of technical score).
+- SUPPORTING coverage: 12 points (20%).
+- PREFERRED coverage: 3 points (5%).
+Within each non-empty category, divide its points equally among that category's
+JD requirements. If a category is empty, redistribute its points
+proportionally to the non-empty categories. A requirement receives its full
+allocation only when explicitly evidenced or defensibly equivalent. Partial or
+unclear evidence receives zero. Never count one JD requirement twice.
+
+Domain score (15 points): award points only for explicit evidence of the same
+or closely comparable domain and comparable project complexity. Do not infer
+domain from a technology name. If domain evidence is absent, award 0/15.
+
+Experience score (25 points) is calculated by the application from the
+canonical profile experience_years and the JD's explicit years target. Do not
+invent years or alter the supplied value.
+
+The application calculates the technical allocation and final percentage. Do
+not adjust match_percentage for intuition; return it only as a provisional
+number and provide the requirement inventory below.
+
+OUTPUT REQUIREMENTS
+- matching_skills: JD skill names with explicit evidence. When wording differs,
+  include the profile wording in parentheses. Never list inferred skills.
+- missing_skills: JD skills not explicitly evidenced; this communicates a gap
+  in supplied evidence, not a definite inability.
+- justification: concise but auditable, maximum 60 words. Include the
+  critical/supporting/preferred split, named evidence, technical/domain/
+  experience components, arithmetic total, and any hard requirement not
+  evidenced. If data is sparse, say so plainly.
+- A 90%+ score requires nearly all critical skills to be evidenced, relevant
+  domain evidence, and the explicit experience requirement to be met or closely
+  supported.
+- Candidates with identical evidence across technical skills, domain, and
+experience must receive identical component and final scores. Do not use
+availability or any unrelated metadata in scoring.
+
+INTERNAL REQUIRED FIELDS (these are not public API fields)
+- critical_requirements: exact JD required-skill names classified as critical.
+  Keep this to the 2-5 central requirements unless fewer are listed.
+- supporting_requirements: remaining exact JD required-skill names.
+- preferred_requirements: exact JD preferred-skill names.
+- domain_score: a numeric 0-15 score based only on explicit domain evidence.
+The same requirement inventory must be returned for every candidate.
+
+Return a JSON array containing exactly one entry per supplied candidate, sorted by
+match_percentage descending. You MUST score every candidate that appears in the input —
+do not omit, merge, or skip any candidate regardless of how low its score is.
 """
 
+    async def _build_profile_requirement_inventory(
+        self,
+        job_details: str,
+    ) -> dict[str, list[str]]:
+        """Classify one JD once so scores are comparable across batches."""
+        compact_jd = compact_job_details(job_details)
+        prompt = (
+            "## Job Description\n"
+            f"{compact_jd}\n\n"
+            "Classify only exact items from required_skills: choose the 2-5 "
+            "central technical requirements as critical; place every other "
+            "required skill in supporting_requirements. Copy preferred_skills "
+            "to preferred_requirements. Do not add, rename, infer, or omit any "
+            "listed skill. Return JSON only."
+        )
+        try:
+            response = await self._generate_hedged(
+                prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=ProfileRequirementInventory,
+                    temperature=0,
+                    max_output_tokens=1024,
+                ),
+            )
+            raw = json.loads(response.text)
+            return ProfileRequirementInventory.model_validate(raw).model_dump()
+        except Exception as exc:
+            # The fallback cannot hallucinate: it is canonicalized from exact
+            # JD lists below, with all requirements retained as supporting.
+            logger.warning(
+                "Profile JD requirement classification failed; using deterministic "
+                "JD-only fallback: %s",
+                exc,
+            )
+            return {
+                "critical_requirements": [],
+                "supporting_requirements": [],
+                "preferred_requirements": [],
+            }
+
     @retry(
-        stop=stop_after_attempt(3),
+        stop=stop_after_attempt(2),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         reraise=True,
     )
@@ -795,6 +1054,7 @@ justification instead).
         self,
         job_details: str,
         variant_payloads: list[dict],
+        requirement_inventory: dict[str, list[str]] | None = None,
     ) -> list[ProfileMatchResult]:
         """Evaluate candidate variant payloads against a JD using Gemini.
 
@@ -809,6 +1069,51 @@ justification instead).
             SynthesisError: When the LLM call fails or returns invalid data.
         """
         start = time.perf_counter()
+
+        # Establish the JD allocation before any candidate batches are sent.
+        # Every candidate in this request must use exactly the same inventory.
+        if requirement_inventory is None:
+            requirement_inventory = await self._build_profile_requirement_inventory(
+                job_details
+            )
+
+        # Do not reduce the retrieval pool to work around model output limits:
+        # score each submitted variant in a separate complete JSON batch, then
+        # merge the verified results. Sequential batches avoid a burst of
+        # concurrent Gemini calls and preserve the existing retry behaviour.
+        if len(variant_payloads) > _PROFILE_MATCH_BATCH_SIZE:
+            logger.info(
+                "[Synthesizer] [synthesize_profile_matches] Splitting %d variants into batches of %d",
+                len(variant_payloads),
+                _PROFILE_MATCH_BATCH_SIZE,
+            )
+            combined_results: list[ProfileMatchResult] = []
+            for batch_start in range(0, len(variant_payloads), _PROFILE_MATCH_BATCH_SIZE):
+                batch = variant_payloads[
+                    batch_start : batch_start + _PROFILE_MATCH_BATCH_SIZE
+                ]
+                logger.info(
+                    "[Synthesizer] Profile-match batch %d-%d of %d",
+                    batch_start + 1,
+                    batch_start + len(batch),
+                    len(variant_payloads),
+                )
+                combined_results.extend(
+                    await self.synthesize_profile_matches(
+                        job_details,
+                        batch,
+                        requirement_inventory=requirement_inventory,
+                    )
+                )
+            combined_results.sort(key=lambda result: result.match_percentage, reverse=True)
+            logger.info(
+                "[Synthesizer] Profile-match batches completed | variants=%d results=%d elapsed=%.2fs",
+                len(variant_payloads),
+                len(combined_results),
+                time.perf_counter() - start,
+            )
+            return combined_results
+
         try:
             # Build the candidate profiles section
             compact_jd = compact_job_details(job_details)
@@ -856,6 +1161,8 @@ justification instead).
             user_prompt = (
                 "## Job Description\n"
                 f"{compact_jd}\n\n"
+                "## Canonical JD Requirement Inventory\n"
+                f"{json.dumps(requirement_inventory, ensure_ascii=True)}\n\n"
                 "## Candidate Profiles\n"
                 f"{candidates_context}"
             )
@@ -864,13 +1171,17 @@ justification instead).
                 "[Synthesizer] [synthesize_profile_matches] Sending to Gemini (model=%s) | variants=%d",
                 self._model, len(variant_payloads),
             )
-            logger.debug(f"Gemini Profile Match Input Prompt:\n{user_prompt}")
+            logger.debug(
+                "Gemini profile-match prompt prepared  |  jd_chars=%d  variants=%d",
+                len(compact_jd), len(variant_payloads),
+            )
             _gemini_start = time.perf_counter()
             response = await self._generate_hedged(user_prompt, config=types.GenerateContentConfig(
                     system_instruction=self._PROFILE_SYSTEM_INSTRUCTION,
                     response_mime_type="application/json",
-                    response_schema=list[ProfileMatchResult],
-                    temperature=0.2,
+                    response_schema=list[ProfileMatchLLMResult],
+                    temperature=0.1,
+                    max_output_tokens=8192,
                 ),
             )
             _gemini_elapsed = time.perf_counter() - _gemini_start
@@ -886,13 +1197,272 @@ justification instead).
                     logger.warning("Metrics persist failed (non-fatal): %s", metrics_err)
 
             raw_text = response.text
-            logger.debug(f"Gemini Profile Match Raw Output JSON:\n{raw_text}")
+            logger.debug("Gemini profile-match response received  |  chars=%d", len(raw_text))
             logger.info(
                 "synthesize_profile_matches  |  raw_response_length=%d",
                 len(raw_text),
             )
 
             raw_results: list[dict] = json.loads(raw_text)
+
+            # Enforce profile provenance at the boundary just as project
+            # matching already does.  An LLM response is not allowed to alter
+            # identity, years, title, or invent a skill outside the supplied
+            # JD.  Canonical payload values win over model-generated copies.
+            payload_by_variant = {
+                str(payload.get("variant_id")): payload
+                for payload in variant_payloads
+                if isinstance(payload, dict) and payload.get("variant_id")
+            }
+            jd_data: dict = {}
+            try:
+                parsed_jd = json.loads(job_details)
+                jd_data = parsed_jd if isinstance(parsed_jd, dict) else {}
+                jd_skills = (
+                    list(jd_data.get("required_skills") or [])
+                    + list(jd_data.get("preferred_skills") or [])
+                )
+            except Exception:
+                # The public endpoint also accepts a pasted plain-text JD.
+                # Preserve lexical requirements for deterministic scoring;
+                # Gemini still performs the semantic/evidence judgment.
+                jd_skills = extract_jd_keywords(job_details).split()
+                jd_data = {
+                    "required_skills": jd_skills,
+                    "experience": job_details,
+                }
+            canonical_skills = {str(skill).strip().lower(): str(skill) for skill in jd_skills if skill}
+            required_skills = [
+                str(skill) for skill in (jd_data.get("required_skills") or [])
+            ]
+            preferred_skills = [
+                str(skill) for skill in (jd_data.get("preferred_skills") or [])
+            ]
+
+            def _canonical_requirement_list(values: object, allowed: set[str]) -> list[str]:
+                if not isinstance(values, list):
+                    return []
+                output: list[str] = []
+                for value in values:
+                    skill = canonical_skills.get(str(value).strip().lower())
+                    if skill and skill in allowed and skill not in output:
+                        output.append(skill)
+                return output
+
+            # Requirement classification belongs to the JD, not to an LLM
+            # result batch. Canonicalize the one preflight inventory strictly
+            # against exact JD skills before scoring anybody.
+            required_set = set(required_skills)
+            critical_requirements = _canonical_requirement_list(
+                requirement_inventory.get("critical_requirements"), required_set,
+            )
+            critical_requirements = critical_requirements[:5]
+            supporting_requirements = [
+                skill for skill in required_skills if skill not in critical_requirements
+            ]
+            if not critical_requirements and required_skills:
+                critical_requirements = required_skills[:5]
+                supporting_requirements = required_skills[5:]
+            preferred_requirements = _canonical_requirement_list(
+                requirement_inventory.get("preferred_requirements"),
+                set(preferred_skills),
+            ) or preferred_skills
+
+            def _technical_score(matching: list[str]) -> float:
+                categories = [
+                    (critical_requirements, 45.0),
+                    (supporting_requirements, 12.0),
+                    (preferred_requirements, 3.0),
+                ]
+                active = [(requirements, weight) for requirements, weight in categories if requirements]
+                if not active:
+                    return 0.0
+                total_weight = sum(weight for _, weight in active)
+                return sum(
+                    (sum(skill in matching for skill in requirements) / len(requirements))
+                    * (60.0 * weight / total_weight)
+                    for requirements, weight in active
+                )
+
+            # The structured experience field can be "2 - 4" or "2 Junior",
+            # not only "2 years". Its first number is the minimum target.
+            experience_text = str(jd_data.get("experience") or "").strip()
+            experience_match = re.search(r"\d+", experience_text)
+            required_years = int(experience_match.group()) if experience_match else None
+
+            def _experience_score(value: object) -> float:
+                try:
+                    years = int(float(value))
+                except (TypeError, ValueError):
+                    years = 0
+                if required_years is None:
+                    return 0.0
+                if years >= required_years:
+                    return 25.0
+                if years == required_years - 1:
+                    return 12.0
+                return 0.0
+
+            target_title = " ".join(
+                str(jd_data.get(key) or "") for key in ("title", "role")
+            ).lower()
+            is_backend_target = bool(
+                re.search(r"\b(java|back\s*end|backend)\b", target_title)
+            )
+
+            def _has_backend_delivery_evidence(payload: dict) -> bool:
+                """A QA title needs actual delivery evidence, not language overlap."""
+                tech_values = list(payload.get("tech_stacks") or [])
+                projects = payload.get("projects") or []
+                descriptions: list[str] = []
+                for project in projects:
+                    tech_values.extend(project.get("tech_stack") or [])
+                    descriptions.append(str(project.get("description") or ""))
+                tech_text = " ".join(map(str, tech_values)).lower()
+                if re.search(
+                    r"\b(spring\s*boot|spring\s*mvc|hibernate|jpa|"
+                    r"microservices?|kafka|quarkus|dropwizard)\b",
+                    tech_text,
+                ):
+                    return True
+                project_text = " ".join(descriptions).lower()
+                return bool(
+                    re.search(r"\b(developed|built|implemented|created|designed)\b", project_text)
+                    and re.search(
+                        r"\b(back\s*end|backend|server[ -]?side|rest(?:ful)?\s+api|microservices?)\b",
+                        project_text,
+                    )
+                )
+
+            def _is_role_ineligible(payload: dict) -> bool:
+                candidate_role = " ".join(
+                    str(payload.get(key) or "") for key in ("role", "variant_title")
+                ).lower()
+                is_qa_role = bool(
+                    re.search(r"\b(qa|quality assurance|test(?:ing)?|sdet)\b", candidate_role)
+                )
+                return is_backend_target and is_qa_role and not _has_backend_delivery_evidence(payload)
+
+            verified_results: list[dict] = []
+            scored_variant_ids: set[str] = set()
+            for item in raw_results:
+                if not isinstance(item, dict):
+                    continue
+                variant_id = str(item.get("variant_id") or "").strip()
+                payload = payload_by_variant.get(variant_id)
+                if payload is None:
+                    logger.warning("Dropping profile-match item with unknown variant_id=%s", variant_id)
+                    continue
+                if variant_id in scored_variant_ids:
+                    logger.warning(
+                        "Dropping duplicate Gemini profile-match item for variant_id=%s",
+                        variant_id,
+                    )
+                    continue
+                scored_variant_ids.add(variant_id)
+
+                def _canonical_skill_list(values: object) -> list[str]:
+                    if not isinstance(values, list):
+                        return []
+                    output: list[str] = []
+                    seen_skills: set[str] = set()
+                    for value in values:
+                        text = str(value).strip()
+                        # "React Query (TanStack Query)" maps to the exact JD
+                        # term while preserving equivalent evidence in the
+                        # justification only.
+                        base = text.split("(", 1)[0].strip().lower()
+                        canonical = canonical_skills.get(base)
+                        if canonical and canonical not in seen_skills:
+                            seen_skills.add(canonical)
+                            output.append(canonical)
+                    return output
+
+                matching = _canonical_skill_list(item.get("matching_skills"))
+                all_requirements = (
+                    critical_requirements + supporting_requirements + preferred_requirements
+                )
+                missing = [skill for skill in all_requirements if skill not in matching]
+                technical_score = _technical_score(matching)
+                try:
+                    domain_score = float(item.get("domain_score", 0))
+                except (TypeError, ValueError):
+                    domain_score = 0.0
+                domain_score = max(0.0, min(15.0, domain_score))
+                experience_score = _experience_score(payload.get("experience_years", 0))
+                final_score = int(round(technical_score + domain_score + experience_score))
+                role_ineligible = _is_role_ineligible(payload)
+                if role_ineligible:
+                    # A Java/SQL keyword match does not establish that a QA
+                    # engineer is qualified for a backend delivery role. Keep
+                    # the result auditable, but prevent it from becoming a
+                    # recommendation unless the profile proves the transition.
+                    logger.info(
+                        "Profile role gate: %s excluded from backend recommendation "
+                        "because QA role lacks explicit backend delivery evidence",
+                        payload.get("candidate_name", variant_id),
+                    )
+                    final_score = 0
+                # Identity and experience always originate from the Qdrant
+                # payload, never from free-form LLM output.
+                item.update({
+                    "candidate_id": str(payload.get("candidate_id", "")),
+                    "candidate_name": str(payload.get("candidate_name", "")),
+                    "variant_id": variant_id,
+                    "variant_title": str(payload.get("variant_title", "")),
+                    "experience_years": payload.get("experience_years", 0),
+                    "matching_skills": matching,
+                    "missing_skills": missing,
+                    "match_percentage": final_score,
+                })
+                role_gate_note = (
+                    " Role gate: QA-labelled profile has no explicit backend "
+                    "delivery evidence; not eligible for this backend role."
+                    if role_ineligible else ""
+                )
+                item["justification"] = (
+                    f"{str(item.get('justification') or '').strip()}{role_gate_note} "
+                    f"Verified score: Technical {technical_score:.1f}/60, "
+                    f"Domain {domain_score:.1f}/15, Experience {experience_score:.1f}/25, "
+                    f"Total {final_score}/100."
+                ).strip()
+                verified_results.append(item)
+
+            # Backfill: create zero-score entries for any candidates Gemini
+            # omitted so no candidate silently disappears from the pipeline.
+            missing_vids = set(payload_by_variant.keys()) - scored_variant_ids
+            if missing_vids:
+                logger.warning(
+                    "[Synthesizer] Gemini omitted %d/%d candidates — backfilling with zero scores",
+                    len(missing_vids), len(payload_by_variant),
+                )
+                all_requirements = (
+                    critical_requirements + supporting_requirements + preferred_requirements
+                )
+                for vid in missing_vids:
+                    p = payload_by_variant[vid]
+                    experience_score = _experience_score(p.get("experience_years", 0))
+                    backfill_score = int(round(experience_score))
+                    verified_results.append({
+                        "candidate_id": str(p.get("candidate_id", "")),
+                        "candidate_name": str(p.get("candidate_name", "")),
+                        "variant_id": vid,
+                        "variant_title": str(p.get("variant_title", "")),
+                        "experience_years": p.get("experience_years", 0),
+                        "matching_skills": [],
+                        "missing_skills": list(all_requirements),
+                        "match_percentage": backfill_score,
+                        "justification": (
+                            "Gemini did not return a score for this candidate. "
+                            f"Backfilled with experience-only score: {backfill_score}/100."
+                        ),
+                    })
+                    logger.info(
+                        "[Synthesizer] Backfilled: %s (%s) → %d%%",
+                        p.get("candidate_name", "?"), vid, backfill_score,
+                    )
+
+            raw_results = verified_results
 
             # Salvage: drop malformed items instead of failing the whole
             # profile-match response (same policy as project matching).

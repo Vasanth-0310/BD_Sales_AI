@@ -158,9 +158,7 @@ class SemanticChunker:
             return []
 
         if len(sentences) == 1:
-            return [
-                {"text": sentences[0], "token_count": len(sentences[0].split())}
-            ]
+            return self._split_long_sentence(sentences[0])
 
         # 2. Encode
         embeddings = self._model.encode(sentences)  # type: ignore[union-attr]
@@ -239,6 +237,23 @@ class SemanticChunker:
             total_words += word_count
 
         return overlap
+
+    def _split_long_sentence(self, sentence: str) -> list[dict]:
+        """Honor the chunk ceiling even for PDF/table text without periods."""
+        words = sentence.split()
+        if len(words) <= self._MAX_CHUNK_WORDS:
+            return [{"text": sentence, "token_count": len(words)}]
+        chunks: list[dict] = []
+        step = self._MAX_CHUNK_WORDS - self._OVERLAP_WORDS
+        for start in range(0, len(words), step):
+            group = words[start:start + self._MAX_CHUNK_WORDS]
+            if not group:
+                break
+            text = " ".join(group)
+            chunks.append({"text": text, "token_count": len(group)})
+            if start + self._MAX_CHUNK_WORDS >= len(words):
+                break
+        return chunks
 
     # ------------------------------------------------------------------
     # Fallback mode

@@ -6,9 +6,10 @@ from src.domain.interfaces.rag.i_synthesizer_port import ISynthesizerPort
 from src.domain.exceptions.rag_exceptions import RAGBaseException
 from src.common.bm25_rescorer import BM25Rescorer, rrf_merge
 from src.application.dto.project_dto import ProjectMatchRequestDTO, ProjectMatchResponseDTO
-from src.common.jd_text import extract_jd_keywords
+from src.common.jd_text import build_retrieval_query, extract_jd_keywords
 from src.common.config import settings
 from src.common.logger import get_logger
+from src.infrastructure.evaluation import pipeline_tracer as _tracer
 
 logger = get_logger(__name__)
 
@@ -16,7 +17,9 @@ logger = get_logger(__name__)
 # evidence (which would starve other Stage-1 winners and bias Gemini's scores
 # toward the most verbose project, not the most relevant one).
 _MAX_EVIDENCE_PER_PROJECT = 3
-_MAX_EVIDENCE_TOTAL = 12
+_MAX_EVIDENCE_TOTAL = 24
+_PROJECT_RETRIEVAL_TOP_K = 30
+_PROJECT_EVIDENCE_POOL_SIZE = 10
 
 
 class MatchProjectsUseCase:
@@ -57,8 +60,11 @@ class MatchProjectsUseCase:
 
             # ── Step 1: Query text ────────────────
             logger.info("[STEP 1] Starting query text setup")
-            query_text = job_details
-            logger.info(f"[STEP 1] Query text ready: {len(query_text)} chars")
+            query_text = build_retrieval_query(job_details)
+            logger.info(
+                "[STEP 1] Query text ready  |  raw_chars=%d  retrieval_chars=%d",
+                len(job_details), len(query_text),
+            )
 
             # ── Step 2: Embed query ──────────────────────────────────────────
             logger.info("[STEP 2] Starting query embedding via Gemini")
@@ -76,10 +82,10 @@ class MatchProjectsUseCase:
 
             dense_results, keyword_results = await asyncio.gather(
                 self._vector_store_port.search_summaries_dense(
-                    query_vector, top_k=10, user_id=dto.user_id or None,
+                    query_vector, top_k=_PROJECT_RETRIEVAL_TOP_K, user_id=dto.user_id or None,
                 ),
                 self._vector_store_port.search_summaries_keyword(
-                    keyword_query, top_k=10, user_id=dto.user_id or None,
+                    keyword_query, top_k=_PROJECT_RETRIEVAL_TOP_K, user_id=dto.user_id or None,
                 ),
             )
 
@@ -134,12 +140,15 @@ class MatchProjectsUseCase:
             
             logger.info("[STEP 7] Starting RRF (Reciprocal Rank Fusion) merge")
             rrf_results = rrf_merge(dense_ranking, bm25_ranking, k=60)
-            top5_project_ids = [pid for pid, _ in rrf_results[:5]]
+            top5_project_ids = [pid for pid, _ in rrf_results[:_PROJECT_EVIDENCE_POOL_SIZE]]
 
             rrf_time = time.perf_counter() - rrf_start
             logger.info(f"[STEP 7] RRF merge completed in {rrf_time:.2f}s")
             logger.debug(f"RRF Output - Full Results (ID, Score): {rrf_results}")
-            logger.info(f"[STEP 7] Top 5 projects selected for deep chunk retrieval: {top5_project_ids}")
+            logger.info(
+                "[STEP 7] Top %d projects selected for deep chunk retrieval: %s",
+                len(top5_project_ids), top5_project_ids,
+            )
 
             if not top5_project_ids:
                 return ProjectMatchResponseDTO.success([])
@@ -158,8 +167,27 @@ class MatchProjectsUseCase:
                 for pid in top5_project_ids
             ))
             chunk_results: list[dict] = []
-            for chunks in per_project:
-                chunk_results.extend(chunks)
+            for pid, chunks in zip(top5_project_ids, per_project):
+                if chunks:
+                    chunk_results.extend(chunks)
+                    continue
+                # A valid project summary must not disappear merely because a
+                # PDF/DOCX yielded no chunks.  Its supplied description is
+                # bounded fallback evidence and remains provenance-checked by
+                # the synthesizer.
+                summary = (candidates_map.get(pid) or {}).get("payload") or {}
+                description = str(summary.get("description") or "").strip()
+                if description:
+                    chunk_results.append({
+                        "score": 0.0,
+                        "payload": {
+                            "project_id": pid,
+                            "project_name": summary.get("project_name", ""),
+                            "domain": summary.get("domain", ""),
+                            "techstacks": summary.get("techstacks", []),
+                            "text": description,
+                        },
+                    })
             stage2_time = time.perf_counter() - stage2_start
             logger.info(f"[STEP 8] Stage 2 chunk retrieval completed in {stage2_time:.2f}s")
             logger.info(f"[STEP 8] Retrieved a total of {len(chunk_results)} evidence chunks")
@@ -184,6 +212,42 @@ class MatchProjectsUseCase:
             gemini_time = time.perf_counter() - gemini_start
             logger.info(f"[STEP 10] Gemini synthesis completed in {gemini_time:.2f}s")
             logger.info(f"[STEP 10] LLM generated {len(match_results)} match justifications")
+
+            # ── RAGAS capture (background, non-blocking) ─────────────────
+            # Stage-1 contexts = project summary texts (retrieval quality)
+            # Stage-2 contexts = evidence chunks shown to Gemini (generation quality)
+            _stage1_ctx = [
+                str(candidates_map.get(pid, {}).get("payload", {}).get("description", "")
+                    or candidates_map.get(pid, {}).get("payload", {}).get("project_name", ""))
+                for pid in top5_project_ids
+            ]
+            _stage2_ctx = [
+                f"Project: {ch.get('project_name', '')}\n"
+                f"Domain: {ch.get('domain', '')}\n"
+                f"Tech: {', '.join(ch.get('techstacks', []) or [])}\n"
+                f"Evidence: {str(ch.get('text', ''))[:500]}"
+                for ch in chunk_evidence
+            ]
+            _answer_text = "\n\n".join(
+                f"{r.project_name} (score {r.match_score:.2f}): {r.justification}"
+                for r in match_results
+            )
+            asyncio.create_task(
+                _tracer.capture_project_sample(
+                    question=job_details,
+                    stage1_contexts=_stage1_ctx,
+                    stage2_contexts=_stage2_ctx,
+                    answer=_answer_text,
+                    retrieval_meta={
+                        "stage1_dense": len(dense_results),
+                        "stage1_keyword": len(keyword_results),
+                        "stage1_merged": len(candidates),
+                        "stage1_top_n": len(top5_project_ids),
+                        "stage2_chunks_raw": len(chunk_results),
+                        "stage2_balanced": len(chunk_evidence),
+                    },
+                )
+            )
 
             # ── Step 11: Filter weak matches + return Top 3 ─────────────────
             # Any project scoring below the threshold is not a meaningful

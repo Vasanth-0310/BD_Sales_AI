@@ -82,8 +82,15 @@ class BM25Rescorer:
         # best-matching candidates.
         bm25 = BM25Plus(corpus, delta=0.25)
         scores = bm25.get_scores(tokenized_query)
-
-        result = {cid: float(score) for cid, score in zip(candidate_ids, scores)}
+        # BM25Plus adds delta * IDF for every query term even when that term
+        # does not occur in a document. Remove that common baseline so a
+        # no-overlap candidate contributes 0 to RRF rather than receiving an
+        # arbitrary rank purely from corpus order.
+        baseline = sum((bm25.idf.get(token) or 0.0) * bm25.delta for token in tokenized_query)
+        result = {
+            cid: max(0.0, float(score) - baseline)
+            for cid, score in zip(candidate_ids, scores)
+        }
 
         logger.info(
             "BM25 rescore complete  |  candidates=%d  query_tokens=%d",
@@ -156,5 +163,5 @@ def _tokenize(text: str) -> list[str]:
     so both retrieval sides split terms identically. Trailing sentence
     punctuation is stripped so "python." doesn't fail to match "python".
     """
-    tokens = re.findall(r"(?:\.NET|[A-Za-z][A-Za-z0-9+#.]*)", text)
+    tokens = re.findall(r"(?:\.NET|[A-Za-z][A-Za-z0-9+#.]*)", text, re.IGNORECASE)
     return [t.rstrip(".").lower() for t in tokens if t.rstrip(".")]

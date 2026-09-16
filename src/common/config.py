@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +29,10 @@ class Settings(BaseSettings):
     # Gemini AI
     gemini_api_key: str = ""
     gemini_model: str = ""
+    # Used when the primary Gemini model is temporarily overloaded or rate
+    # limited. Keep this as a separately configurable model for deployments
+    # with different model access.
+    gemini_fallback_model: str = "gemini-3.6-flash"
     # Soft timeout per Gemini call on the scrape path — a call slower than this
     # is cancelled and retried once (Gemini latency varies 3s-22s for the same
     # prompt; the retry usually lands on a fast route). 0 disables.
@@ -48,6 +53,15 @@ class Settings(BaseSettings):
     qdrant_chunks_collection: str = ""         # e.g. projects_chunks
     qdrant_profile_variants_collection: str = ""  # e.g. profile_variants
     qdrant_vector_size: int = 1536             # gemini-embedding-001 output dim
+    # Shared search scope for the internal BD talent/project library.  This is
+    # an access boundary only: it must never influence retrieval scores or LLM
+    # matching.  Set a unique value per customer/workspace in multi-tenant
+    # deployments, then run the non-destructive workspace backfill script.
+    rag_workspace_id: str = "softsuave"
+    # Upper bound for the unscored Qdrant MatchText candidate scan.  The
+    # application subsequently applies BM25/RRF; a small scroll page here can
+    # otherwise hide a valid result before it is ranked.
+    rag_keyword_candidate_limit: int = 300
 
     # Project matching
     # Below this fused match score a project is not meaningful enough to pitch.
@@ -58,7 +72,40 @@ class Settings(BaseSettings):
     # Profile matching
     # Candidates scoring below this percentage are filtered out before the
     # top-5 slice (mirrors project_match_min_score). 0 disables the filter.
-    profile_match_min_percentage: int = 30
+    # A candidate who evidences a primary job skill is a useful partial match;
+    # eligibility prevents unrelated profiles from passing, so do not discard
+    # relevant developing candidates merely because they lack secondary skills.
+    profile_match_min_percentage: int = 15
+
+    # RAGAS evaluation
+    # Set RAGAS_CAPTURE_ENABLED=false in .env to stop saving evaluation samples
+    # to disk (e.g. for privacy-sensitive deployments). When enabled, every live
+    # profile/project match call appends one sample to data/eval_samples.jsonl;
+    # run scripts/evaluate_pipeline.py to score the collected samples.
+    ragas_capture_enabled: bool = True
+    # Offline RAGAS evaluation limits. Production samples may contain dozens
+    # of retrieved profiles; constrain judge input and retries so an eval run
+    # cannot appear to hang indefinitely or exhaust the Gemini quota.
+    ragas_max_contexts: int = 5
+    ragas_context_max_chars: int = 800
+    ragas_answer_max_chars: int = 1800
+    ragas_judge_model: str = "gemini-3.1-flash-lite"
+    ragas_call_timeout_s: int = 90
+    ragas_max_retries: int = 1
+    ragas_max_workers: int = 4
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def normalize_debug_value(cls, value: object) -> object:
+        """Accept conventional deployment labels supplied through DEBUG."""
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"release", "production", "prod"}:
+                return False
+            if normalized in {"development", "dev"}:
+                return True
+        return value
+
 
     # Scheduler
     session_refresh_interval_hours: int = 3

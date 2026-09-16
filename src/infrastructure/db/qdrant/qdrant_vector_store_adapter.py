@@ -57,6 +57,60 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
             self._profile_collection,
         )
 
+    async def ensure_search_indexes(self) -> None:
+        """Ensure retrieval fields are indexed before serving requests.
+
+        This repairs deployments that predate the workspace or profile text
+        indexes. It is idempotent and never deletes or rewrites points.
+        """
+        plans = {
+            self._summary_collection: {
+                "keyword": ("user_id", "workspace_id", "project_id"),
+                "text": ("description", "project_name", "domain", "techstacks"),
+            },
+            self._chunks_collection: {
+                "keyword": ("user_id", "workspace_id", "project_id"),
+            },
+            self._profile_collection: {
+                "keyword": ("user_id", "workspace_id", "candidate_id"),
+                "text": ("combined_text", "variant_title", "tech_stacks_text"),
+            },
+        }
+        try:
+            for collection_name, fields in plans.items():
+                if not collection_name:
+                    raise RuntimeError("Qdrant collection name is not configured")
+                info = await self._client.get_collection(collection_name)
+                existing = set((info.payload_schema or {}).keys())
+                for field_name in fields.get("keyword", ()):
+                    if field_name in existing:
+                        continue
+                    await self._client.create_payload_index(
+                        collection_name=collection_name,
+                        field_name=field_name,
+                        field_schema=models.PayloadSchemaType.KEYWORD,
+                        wait=True,
+                    )
+                for field_name in fields.get("text", ()):
+                    if field_name in existing:
+                        continue
+                    await self._client.create_payload_index(
+                        collection_name=collection_name,
+                        field_name=field_name,
+                        field_schema=models.TextIndexParams(
+                            type=models.TextIndexType.TEXT,
+                            tokenizer=models.TokenizerType.WORD,
+                            lowercase=True,
+                        ),
+                        wait=True,
+                    )
+            logger.info("Qdrant retrieval indexes verified")
+        except Exception as exc:
+            logger.error("Qdrant retrieval index verification failed: %s", exc)
+            raise VectorStoreError(
+                reason="Qdrant retrieval indexes are missing or unavailable."
+            ) from exc
+
     # ------------------------------------------------------------------
     # Upserts
     # ------------------------------------------------------------------
@@ -80,6 +134,8 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
                 "description": project.description,
                 "links": project.links,
             }
+            if settings.rag_workspace_id.strip():
+                payload["workspace_id"] = settings.rag_workspace_id.strip()
             # Omit when unowned: a stored user_id=null is NOT matched by the
             # tenant filter's is_empty clause in all Qdrant versions.
             if project.user_id:
@@ -143,6 +199,8 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
                     "token_count": chunk.token_count,
                     "sequence_index": chunk.sequence_index,
                 }
+                if settings.rag_workspace_id.strip():
+                    payload["workspace_id"] = settings.rag_workspace_id.strip()
                 # Omit when unowned (same is_empty/null caveat as summaries).
                 if chunk.user_id:
                     payload["user_id"] = chunk.user_id
@@ -194,6 +252,28 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
             ]
         )
 
+    @staticmethod
+    def _retrieval_scope_filter(user_id: str | None) -> Filter | None:
+        """Return the shared-workspace boundary used only for reads.
+
+        ``user_id`` remains the immutable uploader/owner field used by
+        destructive operations.  Matching is deliberately workspace-scoped so
+        colleagues compete on JD evidence, never on which teammate ingested a
+        profile.  A blank workspace setting preserves the legacy per-user
+        behavior for deployments that have not migrated yet.
+        """
+        workspace_id = settings.rag_workspace_id.strip()
+        if workspace_id:
+            return Filter(
+                must=[
+                    FieldCondition(
+                        key="workspace_id",
+                        match=MatchValue(value=workspace_id),
+                    )
+                ]
+            )
+        return QdrantVectorStoreAdapter._tenant_filter(user_id)
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -209,7 +289,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
             results = await self._client.query_points(
                 collection_name=self._summary_collection,
                 query=query_vector,
-                query_filter=self._tenant_filter(user_id),
+                query_filter=self._retrieval_scope_filter(user_id),
                 limit=top_k,
             )
 
@@ -279,7 +359,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
             # would let tenant-owned points bypass the keyword match.
             keyword_group = Filter(should=should_conditions)
             must_clauses: list = [keyword_group]
-            tenant = self._tenant_filter(user_id)
+            tenant = self._retrieval_scope_filter(user_id)
             if tenant is not None:
                 must_clauses.append(tenant)
             scroll_filter = Filter(must=must_clauses)
@@ -290,13 +370,29 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
                 len(should_conditions),
             )
 
-            points, _next_page = await self._client.scroll(
-                collection_name=self._summary_collection,
-                scroll_filter=scroll_filter,
-                limit=top_k,
-                with_payload=True,
-                with_vectors=False,
+            # Scroll is a filter/pagination API, not a relevance-ranked
+            # search.  Read a bounded *set* of matching points, then let the
+            # application-layer BM25/RRF rank the full set.  A single top-k
+            # scroll page made results depend on Qdrant point order.
+            scan_limit = min(
+                settings.rag_keyword_candidate_limit,
+                max(top_k * 10, 100),
             )
+            points = []
+            offset = None
+            while len(points) < scan_limit:
+                batch, next_offset = await self._client.scroll(
+                    collection_name=self._summary_collection,
+                    scroll_filter=scroll_filter,
+                    limit=min(100, scan_limit - len(points)),
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                points.extend(batch)
+                if next_offset is None or not batch:
+                    break
+                offset = next_offset
 
             output = [
                 {
@@ -309,9 +405,10 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
 
             elapsed = time.perf_counter() - start
             logger.info(
-                "search_summaries_keyword completed in %.3fs  |  results=%d",
+                "search_summaries_keyword completed in %.3fs  |  results=%d  |  scan_limit=%d",
                 elapsed,
                 len(output),
+                scan_limit,
             )
             return output
         except Exception as exc:
@@ -344,7 +441,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
             # Stage-1 already scopes project_ids per-tenant, but enforcing the
             # boundary here too keeps chunk content isolated even if a stale
             # or cross-tenant project_id sneaks into the Stage-1 output.
-            tenant = self._tenant_filter(user_id)
+            tenant = self._retrieval_scope_filter(user_id)
             if tenant is not None:
                 must_base.append(tenant)
             query_filter = Filter(must=must_base)
@@ -454,13 +551,16 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
         """Upsert a profile variant point using variant_id as the Qdrant point ID."""
         start = time.perf_counter()
         try:
+            stored_payload = dict(payload)
+            if settings.rag_workspace_id.strip():
+                stored_payload["workspace_id"] = settings.rag_workspace_id.strip()
             await self._client.upsert(
                 collection_name=self._profile_collection,
                 points=[
                     PointStruct(
                         id=variant_id,
                         vector=vector,
-                        payload=payload,
+                        payload=stored_payload,
                     )
                 ],
             )
@@ -520,7 +620,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
             results = await self._client.query_points(
                 collection_name=self._profile_collection,
                 query=query_vector,
-                query_filter=self._tenant_filter(user_id),
+                query_filter=self._retrieval_scope_filter(user_id),
                 limit=top_k,
             )
 
@@ -589,7 +689,7 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
             # reasoning as search_summaries_keyword).
             keyword_group = Filter(should=should_conditions)
             must_clauses: list = [keyword_group]
-            tenant = self._tenant_filter(user_id)
+            tenant = self._retrieval_scope_filter(user_id)
             if tenant is not None:
                 must_clauses.append(tenant)
             scroll_filter = Filter(must=must_clauses)
@@ -600,13 +700,28 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
                 len(should_conditions),
             )
 
-            points, _next_page = await self._client.scroll(
-                collection_name=self._profile_collection,
-                scroll_filter=scroll_filter,
-                limit=top_k,
-                with_payload=True,
-                with_vectors=False,
+            # MatchText is a filter, not a relevance-ranked query.  Pagination
+            # is essential: one page is arbitrary Qdrant point order and can
+            # hide an otherwise excellent candidate before BM25/RRF runs.
+            scroll_limit = min(
+                settings.rag_keyword_candidate_limit,
+                max(top_k * 10, 100),
             )
+            points = []
+            offset = None
+            while len(points) < scroll_limit:
+                batch, next_offset = await self._client.scroll(
+                    collection_name=self._profile_collection,
+                    scroll_filter=scroll_filter,
+                    limit=scroll_limit - len(points),
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                points.extend(batch)
+                if next_offset is None or not batch:
+                    break
+                offset = next_offset
 
             output = [
                 {
@@ -619,9 +734,10 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
 
             elapsed = time.perf_counter() - start
             logger.info(
-                "search_profile_variants_keyword completed in %.3fs  |  results=%d",
+                "search_profile_variants_keyword completed in %.3fs  |  results=%d  |  scroll_limit=%d",
                 elapsed,
                 len(output),
+                scroll_limit,
             )
             return output
         except Exception as exc:
@@ -636,8 +752,12 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
 
         tokens: list[str] = []
         seen: set[str] = set()
-        for raw in re.findall(r"(?:\.NET|[A-Za-z][A-Za-z0-9+#.]*)", query_text):
-            token = raw.strip(".,;:()[]{}'\"").strip()
+        for raw in re.findall(
+            r"(?:\.NET|[A-Za-z][A-Za-z0-9+#.]*)", query_text, re.IGNORECASE
+        ):
+            # Keep the leading dot in .NET; it is part of the technology name,
+            # not surrounding sentence punctuation.
+            token = raw.strip(",;:()[]{}'\"").rstrip(".").strip()
             if not token:
                 continue
             key = token.lower()
@@ -692,10 +812,19 @@ class QdrantVectorStoreAdapter(IVectorStorePort):
 
             payload = points[0].payload or {}
 
-            # Tenant guard: refuse payloads owned by a different user.
-            # Legacy payloads without user_id remain accessible.
+            # Manual matching follows the same shared-workspace policy as
+            # automatic retrieval.  Fall back to individual ownership only
+            # while a deployment has no workspace configured.
+            workspace_id = settings.rag_workspace_id.strip()
             owner = payload.get("user_id")
-            if user_id and owner and owner != user_id:
+            if workspace_id and payload.get("workspace_id") != workspace_id:
+                logger.warning(
+                    "fetch_profile_variant_by_id  |  variant_id=%s belongs to "
+                    "another workspace — access denied.",
+                    variant_id,
+                )
+                return None
+            if not workspace_id and user_id and owner and owner != user_id:
                 logger.warning(
                     "fetch_profile_variant_by_id  |  variant_id=%s belongs to "
                     "another tenant — access denied.",

@@ -41,10 +41,10 @@ SYNC_PROJECTS = True   # Set to False to skip project ingestion
 SYNC_PROFILES = True  # Set to False to skip profile ingestion
 
 # =====================================================================
-# INLINE CREDENTIALS & CONFIGURATION
+# OPTIONAL CONFIGURATION OVERRIDES
 # =====================================================================
-# Fill in your database URLs and API keys here. 
-# This script will NOT read from the .env file.
+# Credentials must come from environment variables or .env. Never commit
+# production secrets to this script. The values below are intentionally blank.
 SYNC_CONFIG = {
     "POSTGRES_URL": "",
     "QDRANT_URL": "",
@@ -59,9 +59,8 @@ SYNC_CONFIG = {
 
 # ---------------------------------------------------------------------
 # ENVIRONMENT INJECTION
-# We inject these values into the system environment BEFORE importing
-# any 'src' modules so that the backend configuration automatically 
-# uses these inline credentials instead of looking for a .env file.
+# Non-secret overrides are injected before importing src modules. Empty values
+# leave the normal .env/settings configuration untouched.
 # ---------------------------------------------------------------------
 for key, value in SYNC_CONFIG.items():
     if value:
@@ -550,26 +549,24 @@ class PostgresToQdrantSyncer:
             return False
 
         missing_variant_ids = pg_variant_ids - qdrant_variant_ids
+        # The workspace migration is deliberately handled by the dedicated
+        # metadata-only backfill script. Keep normal sync differential so it
+        # does not re-embed every existing profile variant.
+        variant_ids_to_sync = missing_variant_ids
         logger.info(
             f"[PROFILES: STEP 3] Diff: {len(pg_variant_ids)} in PG, "
             f"{len(qdrant_variant_ids)} in Qdrant, {len(missing_variant_ids)} missing"
         )
 
-        if not missing_variant_ids:
-            logger.info("[PROFILES] [OK] All profile variants already synced. Nothing to do.")
-            elapsed = time.perf_counter() - start_time
-            logger.info(f"[PROFILES] Phase 2 completed in {elapsed:.2f}s")
-            return True
-
         if dry_run:
             logger.info(
-                f"[PROFILES: DRY RUN] Would sync {len(missing_variant_ids)} variant(s). "
+                f"[PROFILES: DRY RUN] Would upsert {len(variant_ids_to_sync)} missing variant(s). "
                 f"Skipping actual ingestion."
             )
             return True
 
         logger.info(
-            f"[PROFILES: STEP 4] Fetching full data for {len(missing_variant_ids)} missing variant(s)..."
+            f"[PROFILES: STEP 4] Fetching full data for {len(variant_ids_to_sync)} variant(s)..."
         )
         variants_query = """
             SELECT
@@ -620,7 +617,7 @@ class PostgresToQdrantSyncer:
               AND pvp.profile_variant_id::text = ANY(%s);
         """
 
-        missing_list = list(missing_variant_ids)
+        missing_list = list(variant_ids_to_sync)
         try:
             db_start = time.perf_counter()
             variant_rows = await self._fetch_from_pg(variants_query, (missing_list,))
@@ -692,7 +689,7 @@ class PostgresToQdrantSyncer:
 
         logger.info(
             f"[PROFILES: STEP 6] Organized into {len(candidates_map)} candidate(s) "
-            f"representing {len(missing_variant_ids)} missing variant(s)."
+            f"representing {len(variant_ids_to_sync)} missing variant(s)."
         )
 
         logger.info(
